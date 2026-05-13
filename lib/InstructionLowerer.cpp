@@ -1,8 +1,12 @@
 #include "notdec-evm2llvm/InstructionLowerer.h"
 
+#include <vector>
+
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 
 namespace notdec::evm2llvm {
@@ -18,12 +22,14 @@ llvm::Error unsupported(const TacStatement &stmt) {
 
 InstructionLowerer::InstructionLowerer(
     llvm::IRBuilder<> &builder, llvm::LLVMContext &context, llvm::Type *wordType,
-    std::map<FactId, llvm::AllocaInst *> &slots, const TacProgram &program)
+    std::map<FactId, llvm::AllocaInst *> &slots, const TacProgram &program,
+    RuntimeHandles handles)
     : Builder(builder),
       Context(context),
       WordType(wordType),
       Slots(slots),
-      Program(program) {}
+      Program(program),
+      Handles(handles) {}
 
 llvm::APInt InstructionLowerer::parseWordConstant(const std::string &text) const {
   llvm::StringRef value(text);
@@ -61,6 +67,11 @@ llvm::Error InstructionLowerer::storeWord(const FactId &var, llvm::Value *value)
 
 llvm::Value *InstructionLowerer::boolToWord(llvm::Value *value) {
   return Builder.CreateZExt(value, WordType, "evm.bool");
+}
+
+llvm::Function *InstructionLowerer::runtimeFunction(const char *name) {
+  auto *function = Builder.GetInsertBlock()->getParent();
+  return function->getParent()->getFunction(name);
 }
 
 llvm::Expected<llvm::Value *> InstructionLowerer::lowerUnary(
@@ -145,14 +156,253 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerBinary(
   if (stmt.Op == "SGT") {
     return boolToWord(Builder.CreateICmpSGT(lhs, rhs, "evm.sgt"));
   }
+  if (stmt.Op == "DIV") {
+    return Builder.CreateCall(runtimeFunction("evm_div"), {lhs, rhs}, "evm.div");
+  }
+  if (stmt.Op == "SDIV") {
+    return Builder.CreateCall(runtimeFunction("evm_sdiv"), {lhs, rhs}, "evm.sdiv");
+  }
+  if (stmt.Op == "MOD") {
+    return Builder.CreateCall(runtimeFunction("evm_mod"), {lhs, rhs}, "evm.mod");
+  }
+  if (stmt.Op == "SMOD") {
+    return Builder.CreateCall(runtimeFunction("evm_smod"), {lhs, rhs}, "evm.smod");
+  }
+  if (stmt.Op == "EXP") {
+    return Builder.CreateCall(runtimeFunction("evm_exp"), {lhs, rhs}, "evm.exp");
+  }
+  if (stmt.Op == "SIGNEXTEND") {
+    return Builder.CreateCall(runtimeFunction("evm_signextend"), {lhs, rhs},
+                              "evm.signextend");
+  }
+  if (stmt.Op == "BYTE") {
+    return Builder.CreateCall(runtimeFunction("evm_byte"), {lhs, rhs}, "evm.byte");
+  }
+  if (stmt.Op == "SHL") {
+    return Builder.CreateCall(runtimeFunction("evm_shl"), {lhs, rhs}, "evm.shl");
+  }
+  if (stmt.Op == "SHR") {
+    return Builder.CreateCall(runtimeFunction("evm_shr"), {lhs, rhs}, "evm.shr");
+  }
+  if (stmt.Op == "SAR") {
+    return Builder.CreateCall(runtimeFunction("evm_sar"), {lhs, rhs}, "evm.sar");
+  }
+  if (stmt.Op == "SHA3") {
+    return Builder.CreateCall(runtimeFunction("evm_sha3"), {Handles.Mem, lhs, rhs},
+                              "evm.sha3");
+  }
+
+  return unsupported(stmt);
+}
+
+llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
+    const TacStatement &stmt) {
+  if (stmt.Op == "CALLDATASIZE") {
+    if (!stmt.Uses.empty()) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "CALLDATASIZE expects no operands at %s",
+                                     stmt.Id.c_str());
+    }
+    return Builder.CreateCall(runtimeFunction("evm_calldatasize"),
+                              {Handles.Calldata}, "evm.calldatasize");
+  }
+  if (stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
+      stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
+    if (!stmt.Uses.empty()) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "%s expects no operands at %s", stmt.Op.c_str(),
+                                     stmt.Id.c_str());
+    }
+    if (stmt.Op == "CALLVALUE") {
+      return Builder.CreateCall(runtimeFunction("evm_callvalue"), {Handles.Env},
+                                "evm.callvalue");
+    }
+    if (stmt.Op == "CALLER") {
+      return Builder.CreateCall(runtimeFunction("evm_caller"), {Handles.Env},
+                                "evm.caller");
+    }
+    if (stmt.Op == "TIMESTAMP") {
+      return Builder.CreateCall(runtimeFunction("evm_timestamp"), {Handles.Env},
+                                "evm.timestamp");
+    }
+    if (stmt.Op == "GAS") {
+      return Builder.CreateCall(runtimeFunction("evm_gas"), {Handles.Env},
+                                "evm.gas");
+    }
+    return Builder.CreateCall(runtimeFunction("evm_msize"), {Handles.Mem},
+                              "evm.msize");
+  }
+
+  if (stmt.Uses.size() != 1) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "%s expects one operand at %s", stmt.Op.c_str(),
+                                   stmt.Id.c_str());
+  }
+
+  auto operandOrError = loadWord(stmt.Uses[0]);
+  if (!operandOrError) {
+    return operandOrError.takeError();
+  }
+  auto *operand = *operandOrError;
+
+  if (stmt.Op == "MLOAD") {
+    return Builder.CreateCall(runtimeFunction("evm_mload"),
+                              {Handles.Mem, operand}, "evm.mload");
+  }
+  if (stmt.Op == "SLOAD") {
+    return Builder.CreateCall(runtimeFunction("evm_sload"), {operand},
+                              "evm.sload");
+  }
+  if (stmt.Op == "CALLDATALOAD") {
+    return Builder.CreateCall(runtimeFunction("evm_calldataload"),
+                              {Handles.Calldata, operand}, "evm.calldataload");
+  }
+
+  return unsupported(stmt);
+}
+
+llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
+  if (stmt.Op == "CALL") {
+    if (stmt.Uses.size() != 7 || stmt.Defs.size() != 1) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "CALL expects seven operands and one def at %s",
+                                     stmt.Id.c_str());
+    }
+    std::vector<llvm::Value *> args = {Handles.Mem, Handles.Returndata, Handles.Env};
+    for (const auto &use : stmt.Uses) {
+      auto valueOrError = loadWord(use);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      args.push_back(*valueOrError);
+    }
+    auto *success = Builder.CreateCall(runtimeFunction("evm_call"), args, "evm.call");
+    return storeWord(stmt.Defs[0], success);
+  }
+
+  if (stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
+      stmt.Op == "LOG3" || stmt.Op == "LOG4") {
+    unsigned topicCount = static_cast<unsigned>(stmt.Op.back() - '0');
+    if (stmt.Uses.size() != topicCount + 2) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "%s expects %u operands at %s",
+                                     stmt.Op.c_str(), topicCount + 2,
+                                     stmt.Id.c_str());
+    }
+
+    std::vector<llvm::Value *> args = {Handles.Mem};
+    for (const auto &use : stmt.Uses) {
+      auto valueOrError = loadWord(use);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      args.push_back(*valueOrError);
+    }
+    Builder.CreateCall(runtimeFunction(("evm_log" + std::to_string(topicCount)).c_str()),
+                       args);
+    return llvm::Error::success();
+  }
+
+  if (stmt.Op == "CALLDATACOPY") {
+    if (stmt.Uses.size() != 3) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "CALLDATACOPY expects three operands at %s",
+                                     stmt.Id.c_str());
+    }
+    auto dstOrError = loadWord(stmt.Uses[0]);
+    if (!dstOrError) {
+      return dstOrError.takeError();
+    }
+    auto srcOrError = loadWord(stmt.Uses[1]);
+    if (!srcOrError) {
+      return srcOrError.takeError();
+    }
+    auto sizeOrError = loadWord(stmt.Uses[2]);
+    if (!sizeOrError) {
+      return sizeOrError.takeError();
+    }
+    Builder.CreateCall(runtimeFunction("evm_calldatacopy"),
+                       {Handles.Mem, Handles.Calldata, *dstOrError, *srcOrError,
+                        *sizeOrError});
+    return llvm::Error::success();
+  }
+
+  if (stmt.Uses.size() != 2) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "%s expects two operands at %s", stmt.Op.c_str(),
+                                   stmt.Id.c_str());
+  }
+
+  auto lhsOrError = loadWord(stmt.Uses[0]);
+  if (!lhsOrError) {
+    return lhsOrError.takeError();
+  }
+  auto rhsOrError = loadWord(stmt.Uses[1]);
+  if (!rhsOrError) {
+    return rhsOrError.takeError();
+  }
+
+  auto *lhs = *lhsOrError;
+  auto *rhs = *rhsOrError;
+
+  if (stmt.Op == "MSTORE") {
+    Builder.CreateCall(runtimeFunction("evm_mstore"), {Handles.Mem, lhs, rhs});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "MSTORE8") {
+    Builder.CreateCall(runtimeFunction("evm_mstore8"), {Handles.Mem, lhs, rhs});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "SSTORE") {
+    Builder.CreateCall(runtimeFunction("evm_sstore"), {lhs, rhs});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "RETURN") {
+    Builder.CreateCall(runtimeFunction("evm_return"), {Handles.Mem, lhs, rhs});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "REVERT") {
+    Builder.CreateCall(runtimeFunction("evm_revert"), {Handles.Mem, lhs, rhs});
+    return llvm::Error::success();
+  }
 
   return unsupported(stmt);
 }
 
 llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   if (stmt.Op == "JUMP" || stmt.Op == "JUMPI" || stmt.Op == "STOP" ||
-      stmt.Op == "RETURN" || stmt.Op == "REVERT") {
+      stmt.Op == "THROW" || stmt.Op == "RETURNPRIVATE") {
     return llvm::Error::success();
+  }
+  if (stmt.Op == "CALLPRIVATE") {
+    auto *zero = llvm::ConstantInt::get(WordType, 0);
+    for (const auto &def : stmt.Defs) {
+      if (auto error = storeWord(def, zero)) {
+        return error;
+      }
+    }
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "PHI") {
+    if (stmt.Defs.size() != 1) {
+      return llvm::createStringError(std::errc::not_supported,
+                                     "PHI expects one def at %s", stmt.Id.c_str());
+    }
+    if (stmt.Uses.empty()) {
+      return llvm::Error::success();
+    }
+    auto valueOrError = loadWord(stmt.Uses[0]);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    return storeWord(stmt.Defs[0], *valueOrError);
+  }
+  if (stmt.Op == "MSTORE" || stmt.Op == "MSTORE8" || stmt.Op == "SSTORE" ||
+      stmt.Op == "RETURN" || stmt.Op == "REVERT" ||
+      stmt.Op == "CALLDATACOPY" || stmt.Op == "LOG0" || stmt.Op == "LOG1" ||
+      stmt.Op == "LOG2" || stmt.Op == "LOG3" || stmt.Op == "LOG4" ||
+      stmt.Op == "CALL") {
+    return lowerStateWrite(stmt);
   }
 
   llvm::Value *value = nullptr;
@@ -178,8 +428,21 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   } else if (stmt.Op == "ADD" || stmt.Op == "SUB" || stmt.Op == "MUL" ||
              stmt.Op == "AND" || stmt.Op == "OR" || stmt.Op == "XOR" ||
              stmt.Op == "EQ" || stmt.Op == "LT" || stmt.Op == "GT" ||
-             stmt.Op == "SLT" || stmt.Op == "SGT") {
+             stmt.Op == "SLT" || stmt.Op == "SGT" || stmt.Op == "DIV" ||
+             stmt.Op == "SDIV" || stmt.Op == "MOD" || stmt.Op == "SMOD" ||
+             stmt.Op == "EXP" || stmt.Op == "SIGNEXTEND" || stmt.Op == "BYTE" ||
+             stmt.Op == "SHL" || stmt.Op == "SHR" || stmt.Op == "SAR" ||
+             stmt.Op == "SHA3") {
     auto valueOrError = lowerBinary(stmt);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    value = *valueOrError;
+  } else if (stmt.Op == "MLOAD" || stmt.Op == "SLOAD" ||
+             stmt.Op == "CALLDATALOAD" || stmt.Op == "CALLDATASIZE" ||
+             stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
+             stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
+    auto valueOrError = lowerStateRead(stmt);
     if (!valueOrError) {
       return valueOrError.takeError();
     }

@@ -19,6 +19,13 @@ class Value;
 
 namespace notdec::evm2llvm {
 
+struct RuntimeHandles {
+  llvm::Value *Mem = nullptr;
+  llvm::Value *Calldata = nullptr;
+  llvm::Value *Returndata = nullptr;
+  llvm::Value *Env = nullptr;
+};
+
 // Lowers one TAC instruction at a time into the current LLVM basic block. The
 // variable storage map is owned by LlvmLowerer because slots are per function.
 class InstructionLowerer {
@@ -26,7 +33,7 @@ class InstructionLowerer {
   InstructionLowerer(llvm::IRBuilder<> &builder, llvm::LLVMContext &context,
                      llvm::Type *wordType,
                      std::map<FactId, llvm::AllocaInst *> &slots,
-                     const TacProgram &program);
+                     const TacProgram &program, RuntimeHandles handles);
 
   llvm::Error lower(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> loadWord(const FactId &var);
@@ -36,13 +43,17 @@ class InstructionLowerer {
   llvm::Error storeWord(const FactId &var, llvm::Value *value);
   llvm::Expected<llvm::Value *> lowerUnary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerBinary(const TacStatement &stmt);
+  llvm::Expected<llvm::Value *> lowerStateRead(const TacStatement &stmt);
+  llvm::Error lowerStateWrite(const TacStatement &stmt);
   llvm::Value *boolToWord(llvm::Value *value);
+  llvm::Function *runtimeFunction(const char *name);
 
   llvm::IRBuilder<> &Builder;
   llvm::LLVMContext &Context;
   llvm::Type *WordType;
   std::map<FactId, llvm::AllocaInst *> &Slots;
   const TacProgram &Program;
+  RuntimeHandles Handles;
 };
 
 }  // namespace notdec::evm2llvm

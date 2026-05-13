@@ -62,7 +62,9 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
   }
 
   if (successors.empty()) {
-    if (!block.Statements.empty() && block.Statements.back().Op == "REVERT") {
+    if (!block.Statements.empty() &&
+        (block.Statements.back().Op == "REVERT" ||
+         block.Statements.back().Op == "THROW")) {
       builder.CreateUnreachable();
     } else {
       builder.CreateRetVoid();
@@ -119,10 +121,20 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
                              functionName(function), module);
 
   const char *stateArgNames[] = {"mem", "calldata", "returndata", "env"};
+  RuntimeHandles handles;
   unsigned index = 0;
   for (auto &arg : llvmFunction->args()) {
     if (index < 4) {
       arg.setName(stateArgNames[index]);
+      if (index == 0) {
+        handles.Mem = &arg;
+      } else if (index == 1) {
+        handles.Calldata = &arg;
+      } else if (index == 2) {
+        handles.Returndata = &arg;
+      } else if (index == 3) {
+        handles.Env = &arg;
+      }
     } else {
       arg.setName(sanitizeLlvmName(function.Formals[index - 4]));
     }
@@ -165,7 +177,8 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     const auto &block = program.Blocks.at(blockId);
     llvm::IRBuilder<> builder(llvmBlocks[blockId]);
 
-    InstructionLowerer instructionLowerer(builder, context, wordType, slots, program);
+    InstructionLowerer instructionLowerer(builder, context, wordType, slots, program,
+                                          handles);
     for (const auto &stmt : block.Statements) {
       if (auto error = instructionLowerer.lower(stmt)) {
         return error;
