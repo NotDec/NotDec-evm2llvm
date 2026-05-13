@@ -119,6 +119,19 @@ def check_docker_visible_path(path: Path) -> None:
         )
 
 
+def warn_if_phi_incoming_missing(facts_dir: Path) -> None:
+    phi_incoming = facts_dir / "PHIIncoming.csv"
+    if phi_incoming.exists():
+        return
+
+    print(
+        "warning: Gigahorse did not produce PHIIncoming.csv; "
+        "PHI lowering will use the older slot fallback. Use a Gigahorse build "
+        "with PHIIncoming support for predecessor-accurate PHI inputs.",
+        file=sys.stderr,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Gigahorse and lower its facts to LLVM IR."
@@ -211,6 +224,7 @@ def main() -> int:
             print(f"Gigahorse did not create facts directory: {facts_dir}", file=sys.stderr)
             return 1
 
+        warn_if_phi_incoming_missing(facts_dir)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         run([str(args.evm2llvm), "--facts", str(facts_dir), "--output", str(args.output)])
         return 0
