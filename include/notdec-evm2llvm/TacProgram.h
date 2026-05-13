@@ -3,6 +3,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace notdec::evm2llvm {
@@ -46,6 +47,16 @@ struct PrivateCallInfo {
   std::vector<FactId> ReturnVars;
 };
 
+// One predecessor-specific PHI input from Gigahorse. The PHI statement carries
+// the destination variable through TAC_Def; this record adds the missing CFG
+// edge, so lowering can write the right value only on the edge that is taken.
+struct PhiIncoming {
+  FactId PhiStmt;
+  FactId Block;
+  FactId PredBlock;
+  FactId Var;
+};
+
 // Minimal in-memory model used by the first lowering stage. It mirrors the CSV
 // boundary and avoids introducing Solidity or EVM-runtime semantics too early.
 struct TacProgram {
@@ -53,6 +64,7 @@ struct TacProgram {
   std::map<FactId, TacFunction> Functions;
   std::map<FactId, std::string> VariableValues;
   std::map<FactId, PrivateCallInfo> PrivateCallsByBlock;
+  std::map<std::pair<FactId, FactId>, std::vector<PhiIncoming>> PhiIncomingByEdge;
 };
 
 bool factIdLess(const FactId &lhs, const FactId &rhs);

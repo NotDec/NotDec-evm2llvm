@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "llvm/IR/BasicBlock.h"
@@ -77,12 +79,85 @@ void collectFunctionVariables(const TacProgram &program, const TacFunction &func
       variables.insert(stmt.Defs.begin(), stmt.Defs.end());
     }
   }
+
+  for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
+    if (!containsBlock(function, edge.first) || !containsBlock(function, edge.second)) {
+      continue;
+    }
+    for (const auto &incoming : incomingList) {
+      variables.insert(incoming.Var);
+    }
+  }
+}
+
+using PhiDefMap = std::map<FactId, FactId>;
+
+llvm::Error emitPhiEdgeStores(const TacProgram &program,
+                              const PhiDefMap &phiDefs,
+                              const FactId &fromBlock,
+                              const FactId &toBlock,
+                              InstructionLowerer &instructionLowerer) {
+  auto incoming = program.PhiIncomingByEdge.find({fromBlock, toBlock});
+  if (incoming == program.PhiIncomingByEdge.end()) {
+    return llvm::Error::success();
+  }
+
+  for (const auto &edgeValue : incoming->second) {
+    auto def = phiDefs.find(edgeValue.PhiStmt);
+    if (def == phiDefs.end()) {
+      return makeError("PHI incoming references missing PHI statement " +
+                       edgeValue.PhiStmt);
+    }
+    auto valueOrError = instructionLowerer.loadWord(edgeValue.Var);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    if (auto error = instructionLowerer.storeWord(def->second, *valueOrError)) {
+      return error;
+    }
+  }
+
+  return llvm::Error::success();
+}
+
+// Conditional branches need edge blocks when a successor has PHI stores.
+// Otherwise stores for both successors would execute before the branch.
+llvm::Expected<llvm::BasicBlock *> edgeTargetWithPhiStores(
+    const TacProgram &program, const PhiDefMap &phiDefs,
+    const FactId &fromBlock, const FactId &toBlock,
+    llvm::BasicBlock *toLlvmBlock,
+    std::map<FactId, llvm::AllocaInst *> &slots,
+    RuntimeHandles handles, llvm::Type *wordType) {
+  auto incoming = program.PhiIncomingByEdge.find({fromBlock, toBlock});
+  if (incoming == program.PhiIncomingByEdge.end() || incoming->second.empty()) {
+    return toLlvmBlock;
+  }
+
+  auto *function = toLlvmBlock->getParent();
+  auto &context = function->getContext();
+  auto *edgeBlock = llvm::BasicBlock::Create(
+      context,
+      "edge." + sanitizeLlvmName(fromBlock) + ".to." + sanitizeLlvmName(toBlock),
+      function, toLlvmBlock);
+  llvm::IRBuilder<> edgeBuilder(edgeBlock);
+  InstructionLowerer edgeLowerer(edgeBuilder, context, wordType, slots, program,
+                                 handles);
+
+  if (auto error = emitPhiEdgeStores(program, phiDefs, fromBlock, toBlock,
+                                     edgeLowerer)) {
+    return std::move(error);
+  }
+  edgeBuilder.CreateBr(toLlvmBlock);
+  return edgeBlock;
 }
 
 llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &function,
                             const TacBlock &block,
                             std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
+                            std::map<FactId, llvm::AllocaInst *> &slots,
+                            const PhiDefMap &phiDefs,
                             InstructionLowerer &instructionLowerer,
+                            RuntimeHandles handles, llvm::Type *wordType,
                             llvm::IRBuilder<> &builder) {
   std::vector<FactId> successors;
   for (const auto &successor : block.Successors) {
@@ -132,6 +207,10 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
   }
 
   if (successors.size() == 1) {
+    if (auto error = emitPhiEdgeStores(program, phiDefs, block.Id, successors[0],
+                                       instructionLowerer)) {
+      return error;
+    }
     builder.CreateBr(llvmBlocks[successors[0]]);
     return llvm::Error::success();
   }
@@ -149,8 +228,8 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
     return conditionOrError.takeError();
   }
 
-  auto *wordType = llvm::Type::getIntNTy(builder.getContext(), 256);
-  auto *zero = llvm::ConstantInt::get(wordType, 0);
+  auto *conditionWordType = llvm::Type::getIntNTy(builder.getContext(), 256);
+  auto *zero = llvm::ConstantInt::get(conditionWordType, 0);
   auto *condition =
       builder.CreateICmpNE(*conditionOrError, zero, "evm.branch.cond");
 
@@ -161,7 +240,20 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
                      " has a successor outside the current function");
   }
 
-  builder.CreateCondBr(condition, llvmBlocks[trueBlock], llvmBlocks[falseBlock]);
+  auto trueTargetOrError =
+      edgeTargetWithPhiStores(program, phiDefs, block.Id, trueBlock,
+                              llvmBlocks[trueBlock], slots, handles, wordType);
+  if (!trueTargetOrError) {
+    return trueTargetOrError.takeError();
+  }
+  auto falseTargetOrError =
+      edgeTargetWithPhiStores(program, phiDefs, block.Id, falseBlock,
+                              llvmBlocks[falseBlock], slots, handles, wordType);
+  if (!falseTargetOrError) {
+    return falseTargetOrError.takeError();
+  }
+
+  builder.CreateCondBr(condition, *trueTargetOrError, *falseTargetOrError);
   return llvm::Error::success();
 }
 
@@ -285,6 +377,29 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     ++index;
   }
 
+  PhiDefMap phiDefs;
+  std::set<FactId> phisWithIncoming;
+  for (const auto &blockId : function.Blocks) {
+    const auto &block = program.Blocks.at(blockId);
+    for (const auto &stmt : block.Statements) {
+      if (stmt.Op != "PHI") {
+        continue;
+      }
+      if (stmt.Defs.size() != 1) {
+        return makeError("PHI expects one def at " + stmt.Id);
+      }
+      phiDefs[stmt.Id] = stmt.Defs[0];
+    }
+  }
+  for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
+    if (!containsBlock(function, edge.first) || !containsBlock(function, edge.second)) {
+      continue;
+    }
+    for (const auto &incoming : incomingList) {
+      phisWithIncoming.insert(incoming.PhiStmt);
+    }
+  }
+
   for (const auto &blockId : function.Blocks) {
     const auto &block = program.Blocks.at(blockId);
     llvm::IRBuilder<> builder(llvmBlocks[blockId]);
@@ -292,6 +407,9 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     InstructionLowerer instructionLowerer(builder, context, wordType, slots, program,
                                           handles);
     for (const auto &stmt : block.Statements) {
+      if (stmt.Op == "PHI" && phisWithIncoming.count(stmt.Id) != 0) {
+        continue;
+      }
       if (stmt.Op == "CALLPRIVATE") {
         if (auto error = lowerPrivateCall(program, function, block, stmt, llvmFunctions,
                                           instructionLowerer, handles, builder)) {
@@ -308,7 +426,8 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
 
     if (auto error =
-            lowerTerminator(program, function, block, llvmBlocks, instructionLowerer, builder)) {
+            lowerTerminator(program, function, block, llvmBlocks, slots, phiDefs,
+                            instructionLowerer, handles, wordType, builder)) {
       return error;
     }
   }

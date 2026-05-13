@@ -177,6 +177,16 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
     return std::move(error);
   }
 
+  if (auto error = takeRows(loadOptionalRows(config.FactsDir, "PHIIncoming.csv", 4),
+                            [&](const auto &row) {
+                              PhiIncoming incoming{row[0], row[1], row[2], row[3]};
+                              program.PhiIncomingByEdge[{incoming.PredBlock,
+                                                         incoming.Block}]
+                                  .push_back(std::move(incoming));
+                            })) {
+    return std::move(error);
+  }
+
   if (auto error = takeRows(loadOptionalRows(config.FactsDir, "PublicFunction.csv", 2),
                             [&](const auto &row) { publicFunctions.insert(row[0]); })) {
     return std::move(error);
