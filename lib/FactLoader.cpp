@@ -99,6 +99,8 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
   std::map<FactId, std::vector<FactId>> blocksByFunction;
   std::map<FactId, FactId> functionByBlock;
   std::map<FactId, std::vector<std::pair<unsigned, FactId>>> formalsByFunction;
+  std::map<FactId, FactId> privateCallByBlock;
+  std::map<FactId, std::vector<std::pair<unsigned, FactId>>> actualReturnsByBlock;
   std::set<FactId> functions;
   std::set<FactId> entryBlocks;
   std::set<FactId> publicFunctions;
@@ -156,6 +158,21 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
   if (auto error = takeRows(loadRows(config.FactsDir, "FormalArgs.csv", 3),
                             [&](const auto &row) {
                               formalsByFunction[row[0]].push_back({std::stoul(row[2]), row[1]});
+                            })) {
+    return std::move(error);
+  }
+
+  if (auto error = takeRows(loadOptionalRows(config.FactsDir, "IRFunctionCall.csv", 2),
+                            [&](const auto &row) {
+                              privateCallByBlock[row[0]] = row[1];
+                            })) {
+    return std::move(error);
+  }
+
+  if (auto error = takeRows(loadOptionalRows(config.FactsDir, "ActualReturnArgs.csv", 3),
+                            [&](const auto &row) {
+                              actualReturnsByBlock[row[0]].push_back(
+                                  {std::stoul(row[2]), row[1]});
                             })) {
     return std::move(error);
   }
@@ -219,6 +236,17 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
     return std::move(error);
   }
 
+  for (auto &[blockId, callee] : privateCallByBlock) {
+    PrivateCallInfo call;
+    call.CalleeFunction = callee;
+    auto returns = actualReturnsByBlock[blockId];
+    std::sort(returns.begin(), returns.end());
+    for (const auto &[_, var] : returns) {
+      call.ReturnVars.push_back(var);
+    }
+    program.PrivateCallsByBlock[blockId] = std::move(call);
+  }
+
   for (const auto &functionId : functions) {
     auto blockList = blocksByFunction.find(functionId);
     if (blockList == blocksByFunction.end() || blockList->second.empty()) {
@@ -239,6 +267,23 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
     for (const auto &[_, var] : formals) {
       function.Formals.push_back(var);
     }
+
+    std::vector<FactId> returnVars;
+    for (const auto &blockId : function.Blocks) {
+      auto block = program.Blocks.find(blockId);
+      if (block == program.Blocks.end()) {
+        continue;
+      }
+      for (const auto &stmt : block->second.Statements) {
+        if (stmt.Op != "RETURNPRIVATE") {
+          continue;
+        }
+        if (stmt.Uses.size() > returnVars.size() + 1) {
+          returnVars.assign(stmt.Uses.begin() + 1, stmt.Uses.end());
+        }
+      }
+    }
+    function.ReturnVars = std::move(returnVars);
 
     for (const auto &entryBlock : entryBlocks) {
       auto owner = functionByBlock.find(entryBlock);

@@ -37,10 +37,10 @@ class InstructionLowerer {
 
   llvm::Error lower(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> loadWord(const FactId &var);
+  llvm::Error storeWord(const FactId &var, llvm::Value *value);
   llvm::APInt parseWordConstant(const std::string &text) const;
 
  private:
-  llvm::Error storeWord(const FactId &var, llvm::Value *value);
   llvm::Expected<llvm::Value *> lowerUnary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerBinary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerStateRead(const TacStatement &stmt);

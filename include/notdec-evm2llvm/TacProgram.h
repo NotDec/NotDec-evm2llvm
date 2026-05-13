@@ -37,7 +37,13 @@ struct TacFunction {
   FactId EntryBlock;
   bool IsPublic = false;
   std::vector<FactId> Formals;
+  std::vector<FactId> ReturnVars;
   std::vector<FactId> Blocks;
+};
+
+struct PrivateCallInfo {
+  FactId CalleeFunction;
+  std::vector<FactId> ReturnVars;
 };
 
 // Minimal in-memory model used by the first lowering stage. It mirrors the CSV
@@ -46,6 +52,7 @@ struct TacProgram {
   std::map<FactId, TacBlock> Blocks;
   std::map<FactId, TacFunction> Functions;
   std::map<FactId, std::string> VariableValues;
+  std::map<FactId, PrivateCallInfo> PrivateCallsByBlock;
 };
 
 bool factIdLess(const FactId &lhs, const FactId &rhs);
