@@ -19,12 +19,22 @@ Use `scripts/notdec-evm2llvm.py` when starting from EVM bytecode:
 
 ```bash
 scripts/notdec-evm2llvm.py contract.hex -o contract.ll \
-  --gigahorse-dir /path/to/gigahorse-toolchain \
   --evm2llvm /path/to/evm2llvm
 ```
 
 The script runs Gigahorse first, then passes the generated `out/` facts directory
 to `evm2llvm`.
+
+Gigahorse selection order:
+
+1. `$GIGAHORSE_BIN`
+2. `gigahorse` on `PATH`, usually the official Docker wrapper
+3. `$GIGAHORSE_DIR/gigahorse.py`
+4. `/sn640/gigahorse-toolchain/gigahorse.py`
+
+Pass `--gigahorse-dir /path/to/gigahorse-toolchain` to force a local checkout.
+When using the Docker wrapper, the script puts its temporary work directory under
+`$HOME/.cache/notdec-evm2llvm` because the official wrapper only mounts `$HOME`.
 
 End-to-end tests that run Gigahorse are off by default because the first run can
 compile Souffle programs. Enable them explicitly:

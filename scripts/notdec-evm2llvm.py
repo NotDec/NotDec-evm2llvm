@@ -9,6 +9,18 @@ import tempfile
 from pathlib import Path
 
 
+def default_gigahorse_bin() -> Path | None:
+    env_bin = os.environ.get("GIGAHORSE_BIN")
+    if env_bin:
+        return Path(env_bin)
+
+    path_bin = shutil.which("gigahorse")
+    if path_bin:
+        return Path(path_bin)
+
+    return None
+
+
 def default_gigahorse_dir() -> Path | None:
     env_dir = os.environ.get("GIGAHORSE_DIR")
     if env_dir:
@@ -47,6 +59,66 @@ def contract_name(bytecode: Path) -> str:
     return bytecode.name.removesuffix(bytecode.suffix)
 
 
+def docker_visible_root() -> Path:
+    return Path.home() / ".cache" / "notdec-evm2llvm"
+
+
+def build_gigahorse_command(
+    args: argparse.Namespace, bytecode: Path, work_dir: Path
+) -> tuple[list[str], Path | None]:
+    common_args = [
+        "-w",
+        str(work_dir),
+        "-j",
+        str(args.jobs),
+        "-T",
+        str(args.timeout_secs),
+        "--restart",
+        *args.gigahorse_extra_arg,
+        str(bytecode),
+    ]
+
+    if args.gigahorse_dir:
+        gigahorse = args.gigahorse_dir / "gigahorse.py"
+        if not gigahorse.exists():
+            raise FileNotFoundError(f"missing gigahorse.py: {gigahorse}")
+        return [sys.executable, str(gigahorse), *common_args], args.gigahorse_dir
+
+    if args.gigahorse_bin:
+        return [str(args.gigahorse_bin), *common_args], None
+
+    raise FileNotFoundError(
+        "missing Gigahorse; install the docker wrapper as `gigahorse`, pass "
+        "--gigahorse-bin, or pass --gigahorse-dir"
+    )
+
+
+def prepare_bytecode_for_runner(
+    args: argparse.Namespace, bytecode: Path, work_root: Path
+) -> Path:
+    if args.gigahorse_dir:
+        return bytecode.resolve()
+
+    # The official docker wrapper mounts $HOME, not arbitrary paths such as
+    # /tmp or /sn640. Copy the input under $HOME so the container can read it.
+    input_dir = work_root / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    copied = input_dir / bytecode.name
+    shutil.copyfile(bytecode, copied)
+    return copied
+
+
+def check_docker_visible_path(path: Path) -> None:
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    if not resolved.is_relative_to(home):
+        raise ValueError(
+            f"{path} is not under $HOME. The official Gigahorse docker wrapper "
+            "only mounts $HOME; pass a --work-dir under $HOME or force local "
+            "Gigahorse with --gigahorse-dir."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Gigahorse and lower its facts to LLVM IR."
@@ -54,10 +126,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("bytecode", type=Path, help="Input EVM bytecode .hex file.")
     parser.add_argument("-o", "--output", type=Path, required=True, help="Output .ll path.")
     parser.add_argument(
+        "--gigahorse-bin",
+        type=Path,
+        default=default_gigahorse_bin(),
+        help="Gigahorse command. Defaults to $GIGAHORSE_BIN or `gigahorse` on PATH.",
+    )
+    parser.add_argument(
         "--gigahorse-dir",
         type=Path,
-        default=default_gigahorse_dir(),
-        help="Gigahorse checkout. Defaults to $GIGAHORSE_DIR or /sn640/gigahorse-toolchain.",
+        default=None,
+        help="Gigahorse checkout. Forces local gigahorse.py and overrides --gigahorse-bin.",
     )
     parser.add_argument(
         "--evm2llvm",
@@ -98,15 +176,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-
     if args.gigahorse_dir is None:
-        print("missing Gigahorse checkout; pass --gigahorse-dir or set GIGAHORSE_DIR", file=sys.stderr)
-        return 2
-
-    gigahorse = args.gigahorse_dir / "gigahorse.py"
-    if not gigahorse.exists():
-        print(f"missing gigahorse.py: {gigahorse}", file=sys.stderr)
-        return 2
+        args.gigahorse_dir = default_gigahorse_dir() if args.gigahorse_bin is None else None
 
     if not args.bytecode.exists():
         print(f"missing bytecode file: {args.bytecode}", file=sys.stderr)
@@ -117,24 +188,23 @@ def main() -> int:
         work_dir = args.work_dir
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
-        work_dir = Path(tempfile.mkdtemp(prefix="notdec-evm2llvm-"))
+        if args.gigahorse_dir:
+            work_dir = Path(tempfile.mkdtemp(prefix="notdec-evm2llvm-"))
+        else:
+            docker_visible_root().mkdir(parents=True, exist_ok=True)
+            work_dir = Path(
+                tempfile.mkdtemp(
+                    prefix="work-", dir=str(docker_visible_root())
+                )
+            )
         remove_work_dir = not args.keep_work_dir
 
     try:
-        gigahorse_cmd = [
-            sys.executable,
-            str(gigahorse),
-            "-w",
-            str(work_dir),
-            "-j",
-            str(args.jobs),
-            "-T",
-            str(args.timeout_secs),
-            "--restart",
-            *args.gigahorse_extra_arg,
-            str(args.bytecode.resolve()),
-        ]
-        run(gigahorse_cmd, cwd=args.gigahorse_dir)
+        if not args.gigahorse_dir:
+            check_docker_visible_path(work_dir)
+        bytecode = prepare_bytecode_for_runner(args, args.bytecode, work_dir)
+        gigahorse_cmd, cwd = build_gigahorse_command(args, bytecode, work_dir)
+        run(gigahorse_cmd, cwd=cwd)
 
         facts_dir = work_dir / contract_name(args.bytecode) / "out"
         if not facts_dir.exists():
@@ -144,6 +214,9 @@ def main() -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         run([str(args.evm2llvm), "--facts", str(facts_dir), "--output", str(args.output)])
         return 0
+    except (FileNotFoundError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return 2
     finally:
         if remove_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
