@@ -12,6 +12,11 @@ include_directories("${PROJECT_SOURCE_DIR}/include")
 include_directories("${PROJECT_SOURCE_DIR}/include/notdec-evm2llvm")
 
 option(NOTDEC_EVM2LLVM_ENABLE_TESTS "Enable evm2llvm tests." ON)
+option(
+  NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS
+  "Enable end-to-end tests that run Gigahorse from EVM bytecode."
+  OFF
+)
 
 add_subdirectory(lib)
 add_subdirectory(tools)
