@@ -22,11 +22,13 @@ llvm::Error unsupported(const TacStatement &stmt) {
 
 InstructionLowerer::InstructionLowerer(
     llvm::IRBuilder<> &builder, llvm::LLVMContext &context, llvm::Type *wordType,
+    std::map<FactId, llvm::Value *> &values,
     std::map<FactId, llvm::AllocaInst *> &slots, const TacProgram &program,
     RuntimeHandles handles)
     : Builder(builder),
       Context(context),
       WordType(wordType),
+      Values(values),
       Slots(slots),
       Program(program),
       Handles(handles) {}
@@ -41,9 +43,9 @@ llvm::APInt InstructionLowerer::parseWordConstant(const std::string &text) const
 }
 
 llvm::Expected<llvm::Value *> InstructionLowerer::loadWord(const FactId &var) {
-  auto slot = Slots.find(var);
-  if (slot != Slots.end()) {
-    return Builder.CreateLoad(WordType, slot->second, sanitizeLlvmName(var) + ".load");
+  auto value = Values.find(var);
+  if (value != Values.end()) {
+    return value->second;
   }
 
   auto constant = Program.VariableValues.find(var);
@@ -51,8 +53,35 @@ llvm::Expected<llvm::Value *> InstructionLowerer::loadWord(const FactId &var) {
     return llvm::ConstantInt::get(Context, parseWordConstant(constant->second));
   }
 
+  auto slot = Slots.find(var);
+  if (slot != Slots.end()) {
+    return Builder.CreateLoad(WordType, slot->second, sanitizeLlvmName(var) + ".load");
+  }
+
   return llvm::createStringError(std::errc::invalid_argument,
-                                 "variable %s has no slot or constant value", var.c_str());
+                                 "missing SSA value for variable %s", var.c_str());
+}
+
+llvm::Expected<llvm::Value *> InstructionLowerer::loadPhiEdgeWord(const FactId &var) {
+  auto slot = Slots.find(var);
+  if (slot != Slots.end()) {
+    return Builder.CreateLoad(WordType, slot->second, sanitizeLlvmName(var) + ".load");
+  }
+  return loadWord(var);
+}
+
+llvm::Error InstructionLowerer::defineWord(const FactId &var, llvm::Value *value) {
+  if (!Values.emplace(var, value).second) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "duplicate SSA value definition for variable %s",
+                                   var.c_str());
+  }
+
+  auto slot = Slots.find(var);
+  if (slot != Slots.end()) {
+    Builder.CreateStore(value, slot->second);
+  }
+  return llvm::Error::success();
 }
 
 llvm::Error InstructionLowerer::storeWord(const FactId &var, llvm::Value *value) {
@@ -277,7 +306,7 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
       args.push_back(*valueOrError);
     }
     auto *success = Builder.CreateCall(runtimeFunction("evm_call"), args, "evm.call");
-    return storeWord(stmt.Defs[0], success);
+    return defineWord(stmt.Defs[0], success);
   }
 
   if (stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
@@ -377,7 +406,7 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   if (stmt.Op == "CALLPRIVATE") {
     auto *zero = llvm::ConstantInt::get(WordType, 0);
     for (const auto &def : stmt.Defs) {
-      if (auto error = storeWord(def, zero)) {
+      if (auto error = defineWord(def, zero)) {
         return error;
       }
     }
@@ -395,7 +424,7 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
     if (!valueOrError) {
       return valueOrError.takeError();
     }
-    return storeWord(stmt.Defs[0], *valueOrError);
+    return defineWord(stmt.Defs[0], *valueOrError);
   }
   if (stmt.Op == "MSTORE" || stmt.Op == "MSTORE8" || stmt.Op == "SSTORE" ||
       stmt.Op == "RETURN" || stmt.Op == "REVERT" ||
@@ -459,7 +488,7 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
                                    "%s has multiple defs at %s", stmt.Op.c_str(),
                                    stmt.Id.c_str());
   }
-  return storeWord(stmt.Defs[0], value);
+  return defineWord(stmt.Defs[0], value);
 }
 
 }  // namespace notdec::evm2llvm

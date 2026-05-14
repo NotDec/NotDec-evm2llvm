@@ -26,17 +26,21 @@ struct RuntimeHandles {
   llvm::Value *Env = nullptr;
 };
 
-// Lowers one TAC instruction at a time into the current LLVM basic block. The
-// variable storage map is owned by LlvmLowerer because slots are per function.
+// Lowers one TAC instruction at a time into the current LLVM basic block.
+// Values is the main TAC scalar state. Slots stay temporarily for PHI edge
+// stores until native LLVM PHI lowering replaces that path.
 class InstructionLowerer {
  public:
   InstructionLowerer(llvm::IRBuilder<> &builder, llvm::LLVMContext &context,
                      llvm::Type *wordType,
+                     std::map<FactId, llvm::Value *> &values,
                      std::map<FactId, llvm::AllocaInst *> &slots,
                      const TacProgram &program, RuntimeHandles handles);
 
   llvm::Error lower(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> loadWord(const FactId &var);
+  llvm::Expected<llvm::Value *> loadPhiEdgeWord(const FactId &var);
+  llvm::Error defineWord(const FactId &var, llvm::Value *value);
   llvm::Error storeWord(const FactId &var, llvm::Value *value);
   llvm::APInt parseWordConstant(const std::string &text) const;
 
@@ -51,6 +55,7 @@ class InstructionLowerer {
   llvm::IRBuilder<> &Builder;
   llvm::LLVMContext &Context;
   llvm::Type *WordType;
+  std::map<FactId, llvm::Value *> &Values;
   std::map<FactId, llvm::AllocaInst *> &Slots;
   const TacProgram &Program;
   RuntimeHandles Handles;

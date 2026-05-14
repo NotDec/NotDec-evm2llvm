@@ -3,6 +3,7 @@ add_library(notdec-evm2llvm-core STATIC
   FactLoader.cpp
   InstructionLowerer.cpp
   LlvmLowerer.cpp
+  SsaFactValidator.cpp
   TacProgram.cpp
 )
 

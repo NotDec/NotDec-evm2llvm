@@ -17,6 +17,7 @@
 
 #include "notdec-evm2llvm/EvmRuntimeDecls.h"
 #include "notdec-evm2llvm/InstructionLowerer.h"
+#include "notdec-evm2llvm/SsaFactValidator.h"
 
 namespace notdec::evm2llvm {
 namespace {
@@ -28,6 +29,44 @@ llvm::Error makeError(const std::string &message) {
 bool containsBlock(const TacFunction &function, const FactId &blockId) {
   return std::find(function.Blocks.begin(), function.Blocks.end(), blockId) !=
          function.Blocks.end();
+}
+
+void appendPostorder(const TacProgram &program, const TacFunction &function,
+                     const FactId &blockId, std::set<FactId> &visited,
+                     std::vector<FactId> &postorder) {
+  if (!visited.insert(blockId).second) {
+    return;
+  }
+
+  auto block = program.Blocks.find(blockId);
+  if (block == program.Blocks.end()) {
+    postorder.push_back(blockId);
+    return;
+  }
+
+  auto successors = block->second.Successors;
+  std::sort(successors.begin(), successors.end(), factIdLess);
+  for (const auto &successor : successors) {
+    if (containsBlock(function, successor)) {
+      appendPostorder(program, function, successor, visited, postorder);
+    }
+  }
+  postorder.push_back(blockId);
+}
+
+std::vector<FactId> functionBlockLoweringOrder(const TacProgram &program,
+                                               const TacFunction &function) {
+  std::set<FactId> visited;
+  std::vector<FactId> postorder;
+  appendPostorder(program, function, function.EntryBlock, visited, postorder);
+
+  std::vector<FactId> order(postorder.rbegin(), postorder.rend());
+  for (const auto &blockId : function.Blocks) {
+    if (visited.count(blockId) == 0) {
+      order.push_back(blockId);
+    }
+  }
+  return order;
 }
 
 std::string functionName(const TacFunction &function) {
@@ -63,33 +102,6 @@ llvm::Function *createFunctionPrototype(llvm::Module &module,
                                 functionName(function), module);
 }
 
-void collectFunctionVariables(const TacProgram &program, const TacFunction &function,
-                              std::set<FactId> &variables) {
-  for (const auto &formal : function.Formals) {
-    variables.insert(formal);
-  }
-
-  for (const auto &blockId : function.Blocks) {
-    auto block = program.Blocks.find(blockId);
-    if (block == program.Blocks.end()) {
-      continue;
-    }
-    for (const auto &stmt : block->second.Statements) {
-      variables.insert(stmt.Uses.begin(), stmt.Uses.end());
-      variables.insert(stmt.Defs.begin(), stmt.Defs.end());
-    }
-  }
-
-  for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
-    if (!containsBlock(function, edge.first) || !containsBlock(function, edge.second)) {
-      continue;
-    }
-    for (const auto &incoming : incomingList) {
-      variables.insert(incoming.Var);
-    }
-  }
-}
-
 using PhiDefMap = std::map<FactId, FactId>;
 
 llvm::Error emitPhiEdgeStores(const TacProgram &program,
@@ -108,7 +120,7 @@ llvm::Error emitPhiEdgeStores(const TacProgram &program,
       return makeError("PHI incoming references missing PHI statement " +
                        edgeValue.PhiStmt);
     }
-    auto valueOrError = instructionLowerer.loadWord(edgeValue.Var);
+    auto valueOrError = instructionLowerer.loadPhiEdgeWord(edgeValue.Var);
     if (!valueOrError) {
       return valueOrError.takeError();
     }
@@ -126,6 +138,7 @@ llvm::Expected<llvm::BasicBlock *> edgeTargetWithPhiStores(
     const TacProgram &program, const PhiDefMap &phiDefs,
     const FactId &fromBlock, const FactId &toBlock,
     llvm::BasicBlock *toLlvmBlock,
+    std::map<FactId, llvm::Value *> &values,
     std::map<FactId, llvm::AllocaInst *> &slots,
     RuntimeHandles handles, llvm::Type *wordType) {
   auto incoming = program.PhiIncomingByEdge.find({fromBlock, toBlock});
@@ -140,8 +153,8 @@ llvm::Expected<llvm::BasicBlock *> edgeTargetWithPhiStores(
       "edge." + sanitizeLlvmName(fromBlock) + ".to." + sanitizeLlvmName(toBlock),
       function, toLlvmBlock);
   llvm::IRBuilder<> edgeBuilder(edgeBlock);
-  InstructionLowerer edgeLowerer(edgeBuilder, context, wordType, slots, program,
-                                 handles);
+  InstructionLowerer edgeLowerer(edgeBuilder, context, wordType, values, slots,
+                                 program, handles);
 
   if (auto error = emitPhiEdgeStores(program, phiDefs, fromBlock, toBlock,
                                      edgeLowerer)) {
@@ -154,6 +167,7 @@ llvm::Expected<llvm::BasicBlock *> edgeTargetWithPhiStores(
 llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &function,
                             const TacBlock &block,
                             std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
+                            std::map<FactId, llvm::Value *> &values,
                             std::map<FactId, llvm::AllocaInst *> &slots,
                             const PhiDefMap &phiDefs,
                             InstructionLowerer &instructionLowerer,
@@ -242,13 +256,15 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
 
   auto trueTargetOrError =
       edgeTargetWithPhiStores(program, phiDefs, block.Id, trueBlock,
-                              llvmBlocks[trueBlock], slots, handles, wordType);
+                              llvmBlocks[trueBlock], values, slots, handles,
+                              wordType);
   if (!trueTargetOrError) {
     return trueTargetOrError.takeError();
   }
   auto falseTargetOrError =
       edgeTargetWithPhiStores(program, phiDefs, block.Id, falseBlock,
-                              llvmBlocks[falseBlock], slots, handles, wordType);
+                              llvmBlocks[falseBlock], values, slots, handles,
+                              wordType);
   if (!falseTargetOrError) {
     return falseTargetOrError.takeError();
   }
@@ -306,12 +322,12 @@ llvm::Error lowerPrivateCall(
     return llvm::Error::success();
   }
   if (returnVars.size() == 1) {
-    return instructionLowerer.storeWord(returnVars[0], result);
+    return instructionLowerer.defineWord(returnVars[0], result);
   }
 
   for (unsigned i = 0; i < returnVars.size(); ++i) {
     auto *value = builder.CreateExtractValue(result, {i}, "private.ret");
-    if (auto error = instructionLowerer.storeWord(returnVars[i], value)) {
+    if (auto error = instructionLowerer.defineWord(returnVars[i], value)) {
       return error;
     }
   }
@@ -359,26 +375,9 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   }
 
   llvm::IRBuilder<> entryBuilder(llvmBlocks[function.EntryBlock]);
-  std::set<FactId> variables;
-  collectFunctionVariables(program, function, variables);
-
-  std::map<FactId, llvm::AllocaInst *> slots;
-  for (const auto &var : variables) {
-    slots[var] = entryBuilder.CreateAlloca(wordType, nullptr, sanitizeLlvmName(var) + ".slot");
-    entryBuilder.CreateStore(llvm::ConstantInt::get(wordType, 0), slots[var]);
-  }
-
-  index = 0;
-  for (auto &arg : llvmFunction->args()) {
-    if (index >= 4) {
-      auto formalIndex = index - 4;
-      entryBuilder.CreateStore(&arg, slots[function.Formals[formalIndex]]);
-    }
-    ++index;
-  }
-
   PhiDefMap phiDefs;
   std::set<FactId> phisWithIncoming;
+  std::set<FactId> phiEdgeSlotVars;
   for (const auto &blockId : function.Blocks) {
     const auto &block = program.Blocks.at(blockId);
     for (const auto &stmt : block.Statements) {
@@ -397,15 +396,36 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
     for (const auto &incoming : incomingList) {
       phisWithIncoming.insert(incoming.PhiStmt);
+      phiEdgeSlotVars.insert(incoming.Var);
     }
   }
+  for (const auto &phiStmt : phisWithIncoming) {
+    phiEdgeSlotVars.insert(phiDefs.at(phiStmt));
+  }
 
-  for (const auto &blockId : function.Blocks) {
+  std::map<FactId, llvm::Value *> values;
+  std::map<FactId, llvm::AllocaInst *> slots;
+  for (const auto &var : phiEdgeSlotVars) {
+    slots[var] =
+        entryBuilder.CreateAlloca(wordType, nullptr, sanitizeLlvmName(var) + ".slot");
+    entryBuilder.CreateStore(llvm::ConstantInt::get(wordType, 0), slots[var]);
+  }
+
+  index = 0;
+  for (auto &arg : llvmFunction->args()) {
+    if (index >= 4) {
+      auto formalIndex = index - 4;
+      values[function.Formals[formalIndex]] = &arg;
+    }
+    ++index;
+  }
+
+  for (const auto &blockId : functionBlockLoweringOrder(program, function)) {
     const auto &block = program.Blocks.at(blockId);
     llvm::IRBuilder<> builder(llvmBlocks[blockId]);
 
-    InstructionLowerer instructionLowerer(builder, context, wordType, slots, program,
-                                          handles);
+    InstructionLowerer instructionLowerer(builder, context, wordType, values, slots,
+                                          program, handles);
     for (const auto &stmt : block.Statements) {
       if (stmt.Op == "PHI" && phisWithIncoming.count(stmt.Id) != 0) {
         continue;
@@ -426,7 +446,7 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
 
     if (auto error =
-            lowerTerminator(program, function, block, llvmBlocks, slots, phiDefs,
+            lowerTerminator(program, function, block, llvmBlocks, values, slots, phiDefs,
                             instructionLowerer, handles, wordType, builder)) {
       return error;
     }
@@ -440,6 +460,10 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
 llvm::Expected<std::unique_ptr<llvm::Module>> lowerToLlvm(
     llvm::LLVMContext &context, const TacProgram &program,
     const LlvmLowererConfig &config) {
+  if (auto error = validateSsaFacts(program)) {
+    return std::move(error);
+  }
+
   auto module = std::make_unique<llvm::Module>(config.ModuleName, context);
   declareEvmRuntimeHelpers(*module);
 
