@@ -9,11 +9,14 @@
 
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include "notdec-evm2llvm/EvmRuntimeDecls.h"
 #include "notdec-evm2llvm/InstructionLowerer.h"
@@ -103,6 +106,39 @@ llvm::Function *createFunctionPrototype(llvm::Module &module,
 }
 
 using PhiDefMap = std::map<FactId, FactId>;
+
+void promotePhiSlotsToSsa(const std::map<FactId, llvm::AllocaInst *> &slots) {
+  std::vector<llvm::AllocaInst *> promotable;
+  for (const auto &[_, slot] : slots) {
+    if (llvm::isAllocaPromotable(slot)) {
+      promotable.push_back(slot);
+    }
+  }
+  if (promotable.empty()) {
+    return;
+  }
+
+  llvm::DominatorTree dominatorTree(*promotable.front()->getFunction());
+  llvm::PromoteMemToReg(promotable, dominatorTree);
+}
+
+void mergePhiEdgeBlocks(llvm::Function &function) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    std::vector<llvm::BasicBlock *> edgeBlocks;
+    for (auto &block : function) {
+      if (block.getName().starts_with("edge.")) {
+        edgeBlocks.push_back(&block);
+      }
+    }
+
+    for (auto *block : edgeBlocks) {
+      changed |= llvm::MergeBlockIntoPredecessor(
+          block, nullptr, nullptr, nullptr, nullptr, true);
+    }
+  }
+}
 
 llvm::Error emitPhiEdgeStores(const TacProgram &program,
                               const PhiDefMap &phiDefs,
@@ -407,7 +443,7 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   std::map<FactId, llvm::AllocaInst *> slots;
   for (const auto &var : phiEdgeSlotVars) {
     slots[var] =
-        entryBuilder.CreateAlloca(wordType, nullptr, sanitizeLlvmName(var) + ".slot");
+        entryBuilder.CreateAlloca(wordType, nullptr, sanitizeLlvmName(var));
     entryBuilder.CreateStore(llvm::ConstantInt::get(wordType, 0), slots[var]);
   }
 
@@ -452,6 +488,8 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
   }
 
+  promotePhiSlotsToSsa(slots);
+  mergePhiEdgeBlocks(*llvmFunction);
   return llvm::Error::success();
 }
 
