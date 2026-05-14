@@ -126,8 +126,9 @@ def warn_if_phi_incoming_missing(facts_dir: Path) -> None:
 
     print(
         "warning: Gigahorse did not produce PHIIncoming.csv; "
-        "PHI lowering will use the older slot fallback. Use a Gigahorse build "
-        "with PHIIncoming support for predecessor-accurate PHI inputs.",
+        "evm2llvm now requires this fact when TAC PHI statements are present. "
+        "Use a Gigahorse build with PHIIncoming support for predecessor-accurate "
+        "PHI inputs.",
         file=sys.stderr,
     )
 

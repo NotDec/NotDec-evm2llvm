@@ -23,6 +23,7 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
   std::map<FactId, FactId> blockByStmt;
   std::map<FactId, FactId> functionByBlock;
   std::set<std::pair<FactId, FactId>> localEdges;
+  bool hasPhiStmt = false;
 
   for (const auto &[functionId, function] : program.Functions) {
     for (const auto &blockId : function.Blocks) {
@@ -36,6 +37,7 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
     }
 
     for (const auto &stmt : block.Statements) {
+      hasPhiStmt |= stmt.Op == "PHI";
       if (!stmtById.emplace(stmt.Id, &stmt).second) {
         return makeError("duplicate TAC statement id " + stmt.Id);
       }
@@ -55,6 +57,11 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
         definingStmtByVar[def] = stmt.Id;
       }
     }
+  }
+
+  if (hasPhiStmt && !program.HasPhiIncomingFacts) {
+    return makeError("missing PHIIncoming.csv; SSA-only PHI lowering requires "
+                     "Gigahorse facts with predecessor-specific PHI inputs");
   }
 
   for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {

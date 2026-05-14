@@ -64,6 +64,7 @@ struct TacProgram {
   std::map<FactId, TacFunction> Functions;
   std::map<FactId, std::string> VariableValues;
   std::map<FactId, PrivateCallInfo> PrivateCallsByBlock;
+  bool HasPhiIncomingFacts = false;
   std::map<std::pair<FactId, FactId>, std::vector<PhiIncoming>> PhiIncomingByEdge;
 };
 

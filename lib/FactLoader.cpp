@@ -177,6 +177,8 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
     return std::move(error);
   }
 
+  program.HasPhiIncomingFacts =
+      llvm::sys::fs::exists(factPath(config.FactsDir, "PHIIncoming.csv"));
   if (auto error = takeRows(loadOptionalRows(config.FactsDir, "PHIIncoming.csv", 4),
                             [&](const auto &row) {
                               PhiIncoming incoming{row[0], row[1], row[2], row[3]};
