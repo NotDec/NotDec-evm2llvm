@@ -36,6 +36,7 @@ endfunction()
 add_evm2llvm_fixture(arithmetic)
 add_evm2llvm_fixture(state)
 add_evm2llvm_fixture(private_call)
+add_evm2llvm_fixture(private_call_multi_return)
 add_evm2llvm_fixture(phi_branch)
 
 if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
