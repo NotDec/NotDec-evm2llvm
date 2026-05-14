@@ -22,14 +22,12 @@ llvm::Error unsupported(const TacStatement &stmt) {
 
 InstructionLowerer::InstructionLowerer(
     llvm::IRBuilder<> &builder, llvm::LLVMContext &context, llvm::Type *wordType,
-    std::map<FactId, llvm::Value *> &values,
-    std::map<FactId, llvm::AllocaInst *> &slots, const TacProgram &program,
+    std::map<FactId, llvm::Value *> &values, const TacProgram &program,
     RuntimeHandles handles)
     : Builder(builder),
       Context(context),
       WordType(wordType),
       Values(values),
-      Slots(slots),
       Program(program),
       Handles(handles) {}
 
@@ -53,21 +51,8 @@ llvm::Expected<llvm::Value *> InstructionLowerer::loadWord(const FactId &var) {
     return llvm::ConstantInt::get(Context, parseWordConstant(constant->second));
   }
 
-  auto slot = Slots.find(var);
-  if (slot != Slots.end()) {
-    return Builder.CreateLoad(WordType, slot->second, sanitizeLlvmName(var) + ".load");
-  }
-
   return llvm::createStringError(std::errc::invalid_argument,
                                  "missing SSA value for variable %s", var.c_str());
-}
-
-llvm::Expected<llvm::Value *> InstructionLowerer::loadPhiEdgeWord(const FactId &var) {
-  auto slot = Slots.find(var);
-  if (slot != Slots.end()) {
-    return Builder.CreateLoad(WordType, slot->second, sanitizeLlvmName(var) + ".load");
-  }
-  return loadWord(var);
 }
 
 llvm::Error InstructionLowerer::defineWord(const FactId &var, llvm::Value *value) {
@@ -76,21 +61,6 @@ llvm::Error InstructionLowerer::defineWord(const FactId &var, llvm::Value *value
                                    "duplicate SSA value definition for variable %s",
                                    var.c_str());
   }
-
-  auto slot = Slots.find(var);
-  if (slot != Slots.end()) {
-    Builder.CreateStore(value, slot->second);
-  }
-  return llvm::Error::success();
-}
-
-llvm::Error InstructionLowerer::storeWord(const FactId &var, llvm::Value *value) {
-  auto slot = Slots.find(var);
-  if (slot == Slots.end()) {
-    return llvm::createStringError(std::errc::invalid_argument,
-                                   "variable %s has no slot", var.c_str());
-  }
-  Builder.CreateStore(value, slot->second);
   return llvm::Error::success();
 }
 

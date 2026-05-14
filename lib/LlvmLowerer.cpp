@@ -7,16 +7,14 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include "notdec-evm2llvm/EvmRuntimeDecls.h"
 #include "notdec-evm2llvm/InstructionLowerer.h"
@@ -77,6 +75,15 @@ std::string functionName(const TacFunction &function) {
          sanitizeLlvmName(function.Name + "_" + function.Id);
 }
 
+const TacStatement *terminalStatement(const TacBlock &block) {
+  for (auto it = block.Statements.rbegin(); it != block.Statements.rend(); ++it) {
+    if (it->Op != "PHI") {
+      return &*it;
+    }
+  }
+  return nullptr;
+}
+
 llvm::Type *returnTypeFor(llvm::LLVMContext &context,
                           const TacFunction &function) {
   auto *wordType = llvm::Type::getIntNTy(context, 256);
@@ -107,107 +114,72 @@ llvm::Function *createFunctionPrototype(llvm::Module &module,
 
 using PhiDefMap = std::map<FactId, FactId>;
 
-void promotePhiSlotsToSsa(const std::map<FactId, llvm::AllocaInst *> &slots) {
-  std::vector<llvm::AllocaInst *> promotable;
-  for (const auto &[_, slot] : slots) {
-    if (llvm::isAllocaPromotable(slot)) {
-      promotable.push_back(slot);
-    }
-  }
-  if (promotable.empty()) {
-    return;
-  }
+using PhiNodeMap = std::map<FactId, llvm::PHINode *>;
 
-  llvm::DominatorTree dominatorTree(*promotable.front()->getFunction());
-  llvm::PromoteMemToReg(promotable, dominatorTree);
+llvm::APInt parseWordConstant(const std::string &text) {
+  llvm::StringRef value(text);
+  unsigned radix = 10;
+  if (value.consume_front("0x") || value.consume_front("0X")) {
+    radix = 16;
+  }
+  return llvm::APInt(256, value, radix);
 }
 
-void mergePhiEdgeBlocks(llvm::Function &function) {
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    std::vector<llvm::BasicBlock *> edgeBlocks;
-    for (auto &block : function) {
-      if (block.getName().starts_with("edge.")) {
-        edgeBlocks.push_back(&block);
+llvm::Expected<llvm::Value *> valueForPhiIncoming(
+    llvm::LLVMContext &context, const TacProgram &program,
+    const std::map<FactId, llvm::Value *> &values, const FactId &var) {
+  auto value = values.find(var);
+  if (value != values.end()) {
+    return value->second;
+  }
+
+  auto constant = program.VariableValues.find(var);
+  if (constant != program.VariableValues.end()) {
+    return llvm::ConstantInt::get(context, parseWordConstant(constant->second));
+  }
+
+  return makeError("missing SSA value for PHI incoming variable " + var);
+}
+
+llvm::Error fillPhiIncoming(const TacProgram &program, const TacFunction &function,
+                            const std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
+                            const std::map<FactId, llvm::Value *> &values,
+                            const PhiNodeMap &phiNodes,
+                            llvm::LLVMContext &context) {
+  for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
+    if (!containsBlock(function, edge.first) || !containsBlock(function, edge.second)) {
+      continue;
+    }
+
+    auto predBlock = llvmBlocks.find(edge.first);
+    if (predBlock == llvmBlocks.end()) {
+      return makeError("PHI incoming predecessor has no LLVM block " + edge.first);
+    }
+
+    for (const auto &incoming : incomingList) {
+      auto phi = phiNodes.find(incoming.PhiStmt);
+      if (phi == phiNodes.end()) {
+        return makeError("PHI incoming references a PHI without native node " +
+                         incoming.PhiStmt);
       }
-    }
 
-    for (auto *block : edgeBlocks) {
-      changed |= llvm::MergeBlockIntoPredecessor(
-          block, nullptr, nullptr, nullptr, nullptr, true);
-    }
-  }
-}
-
-llvm::Error emitPhiEdgeStores(const TacProgram &program,
-                              const PhiDefMap &phiDefs,
-                              const FactId &fromBlock,
-                              const FactId &toBlock,
-                              InstructionLowerer &instructionLowerer) {
-  auto incoming = program.PhiIncomingByEdge.find({fromBlock, toBlock});
-  if (incoming == program.PhiIncomingByEdge.end()) {
-    return llvm::Error::success();
-  }
-
-  for (const auto &edgeValue : incoming->second) {
-    auto def = phiDefs.find(edgeValue.PhiStmt);
-    if (def == phiDefs.end()) {
-      return makeError("PHI incoming references missing PHI statement " +
-                       edgeValue.PhiStmt);
-    }
-    auto valueOrError = instructionLowerer.loadPhiEdgeWord(edgeValue.Var);
-    if (!valueOrError) {
-      return valueOrError.takeError();
-    }
-    if (auto error = instructionLowerer.storeWord(def->second, *valueOrError)) {
-      return error;
+      auto valueOrError =
+          valueForPhiIncoming(context, program, values, incoming.Var);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      phi->second->addIncoming(*valueOrError, predBlock->second);
     }
   }
 
   return llvm::Error::success();
 }
 
-// Conditional branches need edge blocks when a successor has PHI stores.
-// Otherwise stores for both successors would execute before the branch.
-llvm::Expected<llvm::BasicBlock *> edgeTargetWithPhiStores(
-    const TacProgram &program, const PhiDefMap &phiDefs,
-    const FactId &fromBlock, const FactId &toBlock,
-    llvm::BasicBlock *toLlvmBlock,
-    std::map<FactId, llvm::Value *> &values,
-    std::map<FactId, llvm::AllocaInst *> &slots,
-    RuntimeHandles handles, llvm::Type *wordType) {
-  auto incoming = program.PhiIncomingByEdge.find({fromBlock, toBlock});
-  if (incoming == program.PhiIncomingByEdge.end() || incoming->second.empty()) {
-    return toLlvmBlock;
-  }
-
-  auto *function = toLlvmBlock->getParent();
-  auto &context = function->getContext();
-  auto *edgeBlock = llvm::BasicBlock::Create(
-      context,
-      "edge." + sanitizeLlvmName(fromBlock) + ".to." + sanitizeLlvmName(toBlock),
-      function, toLlvmBlock);
-  llvm::IRBuilder<> edgeBuilder(edgeBlock);
-  InstructionLowerer edgeLowerer(edgeBuilder, context, wordType, values, slots,
-                                 program, handles);
-
-  if (auto error = emitPhiEdgeStores(program, phiDefs, fromBlock, toBlock,
-                                     edgeLowerer)) {
-    return std::move(error);
-  }
-  edgeBuilder.CreateBr(toLlvmBlock);
-  return edgeBlock;
-}
-
 llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &function,
                             const TacBlock &block,
                             std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
                             std::map<FactId, llvm::Value *> &values,
-                            std::map<FactId, llvm::AllocaInst *> &slots,
-                            const PhiDefMap &phiDefs,
                             InstructionLowerer &instructionLowerer,
-                            RuntimeHandles handles, llvm::Type *wordType,
                             llvm::IRBuilder<> &builder) {
   std::vector<FactId> successors;
   for (const auto &successor : block.Successors) {
@@ -217,13 +189,12 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
   }
 
   if (successors.empty()) {
-    if (!block.Statements.empty() &&
-        (block.Statements.back().Op == "REVERT" ||
-         block.Statements.back().Op == "THROW")) {
+    const auto *terminal = terminalStatement(block);
+    if (terminal != nullptr &&
+        (terminal->Op == "REVERT" || terminal->Op == "THROW")) {
       builder.CreateUnreachable();
-    } else if (!block.Statements.empty() &&
-               block.Statements.back().Op == "RETURNPRIVATE") {
-      const auto &stmt = block.Statements.back();
+    } else if (terminal != nullptr && terminal->Op == "RETURNPRIVATE") {
+      const auto &stmt = *terminal;
       if (stmt.Uses.size() != function.ReturnVars.size() + 1) {
         return makeError("RETURNPRIVATE return count mismatch at " + stmt.Id);
       }
@@ -257,10 +228,6 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
   }
 
   if (successors.size() == 1) {
-    if (auto error = emitPhiEdgeStores(program, phiDefs, block.Id, successors[0],
-                                       instructionLowerer)) {
-      return error;
-    }
     builder.CreateBr(llvmBlocks[successors[0]]);
     return llvm::Error::success();
   }
@@ -269,11 +236,12 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
     return makeError("block " + block.Id + " has more than two successors");
   }
 
-  if (block.Statements.empty() || block.Statements.back().Uses.empty()) {
+  const auto *terminal = terminalStatement(block);
+  if (terminal == nullptr || terminal->Uses.empty()) {
     return makeError("conditional block " + block.Id + " has no condition use");
   }
 
-  auto conditionOrError = instructionLowerer.loadWord(block.Statements.back().Uses[0]);
+  auto conditionOrError = instructionLowerer.loadWord(terminal->Uses[0]);
   if (!conditionOrError) {
     return conditionOrError.takeError();
   }
@@ -290,22 +258,7 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
                      " has a successor outside the current function");
   }
 
-  auto trueTargetOrError =
-      edgeTargetWithPhiStores(program, phiDefs, block.Id, trueBlock,
-                              llvmBlocks[trueBlock], values, slots, handles,
-                              wordType);
-  if (!trueTargetOrError) {
-    return trueTargetOrError.takeError();
-  }
-  auto falseTargetOrError =
-      edgeTargetWithPhiStores(program, phiDefs, block.Id, falseBlock,
-                              llvmBlocks[falseBlock], values, slots, handles,
-                              wordType);
-  if (!falseTargetOrError) {
-    return falseTargetOrError.takeError();
-  }
-
-  builder.CreateCondBr(condition, *trueTargetOrError, *falseTargetOrError);
+  builder.CreateCondBr(condition, llvmBlocks[trueBlock], llvmBlocks[falseBlock]);
   return llvm::Error::success();
 }
 
@@ -413,7 +366,6 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   llvm::IRBuilder<> entryBuilder(llvmBlocks[function.EntryBlock]);
   PhiDefMap phiDefs;
   std::set<FactId> phisWithIncoming;
-  std::set<FactId> phiEdgeSlotVars;
   for (const auto &blockId : function.Blocks) {
     const auto &block = program.Blocks.at(blockId);
     for (const auto &stmt : block.Statements) {
@@ -432,20 +384,11 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
     for (const auto &incoming : incomingList) {
       phisWithIncoming.insert(incoming.PhiStmt);
-      phiEdgeSlotVars.insert(incoming.Var);
     }
-  }
-  for (const auto &phiStmt : phisWithIncoming) {
-    phiEdgeSlotVars.insert(phiDefs.at(phiStmt));
   }
 
   std::map<FactId, llvm::Value *> values;
-  std::map<FactId, llvm::AllocaInst *> slots;
-  for (const auto &var : phiEdgeSlotVars) {
-    slots[var] =
-        entryBuilder.CreateAlloca(wordType, nullptr, sanitizeLlvmName(var));
-    entryBuilder.CreateStore(llvm::ConstantInt::get(wordType, 0), slots[var]);
-  }
+  PhiNodeMap phiNodes;
 
   index = 0;
   for (auto &arg : llvmFunction->args()) {
@@ -456,11 +399,30 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     ++index;
   }
 
+  // Create all native PHI placeholders before lowering instructions. This lets
+  // loop-carried uses refer to the PHI result before incoming edges are known.
+  for (const auto &blockId : functionBlockLoweringOrder(program, function)) {
+    const auto &block = program.Blocks.at(blockId);
+    llvm::IRBuilder<> builder(llvmBlocks[blockId]);
+    for (const auto &stmt : block.Statements) {
+      if (stmt.Op != "PHI" || phisWithIncoming.count(stmt.Id) == 0) {
+        continue;
+      }
+      auto def = phiDefs.find(stmt.Id);
+      if (def == phiDefs.end()) {
+        return makeError("PHI has no def at " + stmt.Id);
+      }
+      auto *phi = builder.CreatePHI(wordType, 0, sanitizeLlvmName(def->second));
+      phiNodes[stmt.Id] = phi;
+      values[def->second] = phi;
+    }
+  }
+
   for (const auto &blockId : functionBlockLoweringOrder(program, function)) {
     const auto &block = program.Blocks.at(blockId);
     llvm::IRBuilder<> builder(llvmBlocks[blockId]);
 
-    InstructionLowerer instructionLowerer(builder, context, wordType, values, slots,
+    InstructionLowerer instructionLowerer(builder, context, wordType, values,
                                           program, handles);
     for (const auto &stmt : block.Statements) {
       if (stmt.Op == "PHI" && phisWithIncoming.count(stmt.Id) != 0) {
@@ -482,14 +444,16 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
     }
 
     if (auto error =
-            lowerTerminator(program, function, block, llvmBlocks, values, slots, phiDefs,
-                            instructionLowerer, handles, wordType, builder)) {
+            lowerTerminator(program, function, block, llvmBlocks, values,
+                            instructionLowerer, builder)) {
       return error;
     }
   }
 
-  promotePhiSlotsToSsa(slots);
-  mergePhiEdgeBlocks(*llvmFunction);
+  if (auto error = fillPhiIncoming(program, function, llvmBlocks, values,
+                                   phiNodes, context)) {
+    return error;
+  }
   return llvm::Error::success();
 }
 

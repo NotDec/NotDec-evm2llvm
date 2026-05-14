@@ -23,6 +23,9 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
   std::map<FactId, FactId> blockByStmt;
   std::map<FactId, FactId> functionByBlock;
   std::set<std::pair<FactId, FactId>> localEdges;
+  std::map<FactId, std::set<FactId>> predsByBlock;
+  std::map<FactId, std::set<FactId>> incomingPredsByPhi;
+  std::set<std::pair<FactId, FactId>> incomingPhiPreds;
   bool hasPhiStmt = false;
 
   for (const auto &[functionId, function] : program.Functions) {
@@ -34,6 +37,7 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
   for (const auto &[blockId, block] : program.Blocks) {
     for (const auto &successor : block.Successors) {
       localEdges.insert({blockId, successor});
+      predsByBlock[successor].insert(blockId);
     }
 
     for (const auto &stmt : block.Statements) {
@@ -84,6 +88,12 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
     }
 
     for (const auto &incoming : incomingList) {
+      if (!incomingPhiPreds.insert({incoming.PhiStmt, incoming.PredBlock}).second) {
+        return makeError("duplicate PHIIncoming predecessor for PHI " +
+                         incoming.PhiStmt + " from " + incoming.PredBlock);
+      }
+      incomingPredsByPhi[incoming.PhiStmt].insert(incoming.PredBlock);
+
       auto stmt = stmtById.find(incoming.PhiStmt);
       if (stmt == stmtById.end()) {
         return makeError("PHIIncoming references missing PHI statement " +
@@ -106,6 +116,45 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
       if (incoming.PredBlock != edge.first || incoming.Block != edge.second) {
         return makeError("PHIIncoming row does not match its edge for PHI " +
                          incoming.PhiStmt);
+      }
+    }
+  }
+
+  for (const auto &[stmtId, stmt] : stmtById) {
+    if (stmt->Op != "PHI") {
+      continue;
+    }
+
+    auto phiBlock = blockByStmt.find(stmtId);
+    if (phiBlock == blockByStmt.end()) {
+      return makeError("PHI statement has no block " + stmtId);
+    }
+
+    std::set<FactId> expectedPreds;
+    auto blockPreds = predsByBlock.find(phiBlock->second);
+    if (blockPreds != predsByBlock.end()) {
+      for (const auto &pred : blockPreds->second) {
+        auto predFunction = functionByBlock.find(pred);
+        auto blockFunction = functionByBlock.find(phiBlock->second);
+        if (predFunction != functionByBlock.end() &&
+            blockFunction != functionByBlock.end() &&
+            predFunction->second == blockFunction->second) {
+          expectedPreds.insert(pred);
+        }
+      }
+    }
+
+    const auto &actualPreds = incomingPredsByPhi[stmtId];
+    for (const auto &pred : expectedPreds) {
+      if (actualPreds.count(pred) == 0) {
+        return makeError("PHIIncoming missing predecessor for PHI " + stmtId +
+                         " from " + pred);
+      }
+    }
+    for (const auto &pred : actualPreds) {
+      if (expectedPreds.count(pred) == 0) {
+        return makeError("PHIIncoming has non-predecessor for PHI " + stmtId +
+                         " from " + pred);
       }
     }
   }
