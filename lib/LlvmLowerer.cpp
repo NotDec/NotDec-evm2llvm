@@ -351,7 +351,7 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   }
 
   std::map<FactId, llvm::BasicBlock *> llvmBlocks;
-  for (const auto &blockId : function.Blocks) {
+  for (const auto &blockId : functionBlockLoweringOrder(program, function)) {
     if (!program.Blocks.count(blockId)) {
       return makeError("function " + function.Id + " references missing block " + blockId);
     }

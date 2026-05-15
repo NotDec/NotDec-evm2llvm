@@ -38,6 +38,7 @@ add_evm2llvm_fixture(state)
 add_evm2llvm_fixture(private_call)
 add_evm2llvm_fixture(private_call_multi_return)
 add_evm2llvm_fixture(phi_branch)
+add_evm2llvm_fixture(entry_order)
 
 if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
   function(add_evm2llvm_gigahorse_test name bytecode)
