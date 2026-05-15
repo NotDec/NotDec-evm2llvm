@@ -73,6 +73,8 @@ def build_gigahorse_command(
         str(args.jobs),
         "-T",
         str(args.timeout_secs),
+        "--results_file",
+        str(work_dir / "results.json"),
         "--restart",
         *args.gigahorse_extra_arg,
         str(bytecode),

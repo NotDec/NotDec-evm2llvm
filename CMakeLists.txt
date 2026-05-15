@@ -17,6 +17,16 @@ option(
   "Enable end-to-end tests that run Gigahorse from EVM bytecode."
   OFF
 )
+option(
+  NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_SLOW_TESTS
+  "Enable slower Gigahorse bytecode tests."
+  OFF
+)
+set(
+  NOTDEC_EVM2LLVM_GIGAHORSE_ROOT
+  "/sn640/gigahorse-toolchain"
+  CACHE PATH "Gigahorse checkout used by evm2llvm bytecode tests."
+)
 
 add_subdirectory(lib)
 add_subdirectory(tools)
