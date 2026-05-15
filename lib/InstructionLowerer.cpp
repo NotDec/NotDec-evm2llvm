@@ -205,6 +205,15 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     return Builder.CreateCall(runtimeFunction("evm_calldatasize"),
                               {Handles.Calldata}, "evm.calldatasize");
   }
+  if (stmt.Op == "RETURNDATASIZE") {
+    if (!stmt.Uses.empty()) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "RETURNDATASIZE expects no operands at %s", stmt.Id.c_str());
+    }
+    return Builder.CreateCall(runtimeFunction("evm_returndatasize"),
+                              {Handles.Returndata}, "evm.returndatasize");
+  }
   if (stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
       stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
     if (!stmt.Uses.empty()) {
@@ -278,6 +287,28 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     auto *success = Builder.CreateCall(runtimeFunction("evm_call"), args, "evm.call");
     return defineWord(stmt.Defs[0], success);
   }
+  if (stmt.Op == "DELEGATECALL") {
+    if (stmt.Uses.size() != 6 || stmt.Defs.size() != 1) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "DELEGATECALL expects six operands and one def at %s",
+          stmt.Id.c_str());
+    }
+    // DELEGATECALL has CALL-like memory/returndata effects but no value
+    // operand. The helper keeps those effects explicit for later passes.
+    std::vector<llvm::Value *> args = {Handles.Mem, Handles.Returndata,
+                                       Handles.Env};
+    for (const auto &use : stmt.Uses) {
+      auto valueOrError = loadWord(use);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      args.push_back(*valueOrError);
+    }
+    auto *success = Builder.CreateCall(runtimeFunction("evm_delegatecall"), args,
+                                       "evm.delegatecall");
+    return defineWord(stmt.Defs[0], success);
+  }
 
   if (stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
       stmt.Op == "LOG3" || stmt.Op == "LOG4") {
@@ -322,6 +353,29 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     }
     Builder.CreateCall(runtimeFunction("evm_calldatacopy"),
                        {Handles.Mem, Handles.Calldata, *dstOrError, *srcOrError,
+                        *sizeOrError});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "RETURNDATACOPY") {
+    if (stmt.Uses.size() != 3) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "RETURNDATACOPY expects three operands at %s", stmt.Id.c_str());
+    }
+    auto dstOrError = loadWord(stmt.Uses[0]);
+    if (!dstOrError) {
+      return dstOrError.takeError();
+    }
+    auto srcOrError = loadWord(stmt.Uses[1]);
+    if (!srcOrError) {
+      return srcOrError.takeError();
+    }
+    auto sizeOrError = loadWord(stmt.Uses[2]);
+    if (!sizeOrError) {
+      return sizeOrError.takeError();
+    }
+    Builder.CreateCall(runtimeFunction("evm_returndatacopy"),
+                       {Handles.Mem, Handles.Returndata, *dstOrError, *srcOrError,
                         *sizeOrError});
     return llvm::Error::success();
   }
@@ -398,9 +452,10 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   }
   if (stmt.Op == "MSTORE" || stmt.Op == "MSTORE8" || stmt.Op == "SSTORE" ||
       stmt.Op == "RETURN" || stmt.Op == "REVERT" ||
-      stmt.Op == "CALLDATACOPY" || stmt.Op == "LOG0" || stmt.Op == "LOG1" ||
-      stmt.Op == "LOG2" || stmt.Op == "LOG3" || stmt.Op == "LOG4" ||
-      stmt.Op == "CALL") {
+      stmt.Op == "CALLDATACOPY" || stmt.Op == "RETURNDATACOPY" ||
+      stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
+      stmt.Op == "LOG3" || stmt.Op == "LOG4" || stmt.Op == "CALL" ||
+      stmt.Op == "DELEGATECALL") {
     return lowerStateWrite(stmt);
   }
 
@@ -439,6 +494,7 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
     value = *valueOrError;
   } else if (stmt.Op == "MLOAD" || stmt.Op == "SLOAD" ||
              stmt.Op == "CALLDATALOAD" || stmt.Op == "CALLDATASIZE" ||
+             stmt.Op == "RETURNDATASIZE" ||
              stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
              stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
     auto valueOrError = lowerStateRead(stmt);
