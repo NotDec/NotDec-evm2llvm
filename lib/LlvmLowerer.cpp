@@ -13,6 +13,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 
@@ -84,6 +85,20 @@ const TacStatement *terminalStatement(const TacBlock &block) {
   return nullptr;
 }
 
+const TacStatement *terminatorMetadataStatement(const TacBlock &block) {
+  const auto *stmt = terminalStatement(block);
+  if (stmt == nullptr) {
+    return nullptr;
+  }
+
+  if (stmt->Op == "JUMP" || stmt->Op == "JUMPI" || stmt->Op == "STOP" ||
+      stmt->Op == "THROW" || stmt->Op == "RETURNPRIVATE" ||
+      stmt->Op == "RETURN" || stmt->Op == "REVERT") {
+    return stmt;
+  }
+  return nullptr;
+}
+
 llvm::Type *returnTypeFor(llvm::LLVMContext &context,
                           const TacFunction &function) {
   auto *wordType = llvm::Type::getIntNTy(context, 256);
@@ -115,6 +130,77 @@ llvm::Function *createFunctionPrototype(llvm::Module &module,
 using PhiDefMap = std::map<FactId, FactId>;
 
 using PhiNodeMap = std::map<FactId, llvm::PHINode *>;
+
+std::string joinFactIds(const std::vector<FactId> &ids) {
+  std::string result;
+  for (const auto &id : ids) {
+    if (!result.empty()) {
+      result += ",";
+    }
+    result += id;
+  }
+  return result;
+}
+
+llvm::MDNode *metadataForStmt(llvm::LLVMContext &context,
+                              const TacProgram &program,
+                              const TacStatement &stmt) {
+  std::vector<llvm::Metadata *> fields = {
+      llvm::MDString::get(context, "tac=" + stmt.Id),
+      llvm::MDString::get(context, "op=" + stmt.Op),
+  };
+
+  auto originals = program.OriginalStatementsByStmt.find(stmt.Id);
+  if (originals != program.OriginalStatementsByStmt.end() &&
+      !originals->second.empty()) {
+    fields.push_back(
+        llvm::MDString::get(context, "evm.pc=" + joinFactIds(originals->second)));
+  }
+
+  auto inlineInfo = program.InlineInfoByStmt.find(stmt.Id);
+  if (inlineInfo != program.InlineInfoByStmt.end() &&
+      inlineInfo->second != "nil") {
+    fields.push_back(
+        llvm::MDString::get(context, "inline=" + inlineInfo->second));
+  }
+
+  return llvm::MDNode::get(context, fields);
+}
+
+void attachStmtMetadata(llvm::Instruction &instruction,
+                        llvm::LLVMContext &context,
+                        const TacProgram &program,
+                        const TacStatement &stmt) {
+  instruction.setMetadata("notdec.evm",
+                          metadataForStmt(context, program, stmt));
+}
+
+class InsertedInstructionAnnotator {
+ public:
+  explicit InsertedInstructionAnnotator(llvm::BasicBlock &block)
+      : Block(block), HadTail(!block.empty()) {
+    if (HadTail) {
+      Tail = std::prev(block.end());
+    }
+  }
+
+  void annotate(llvm::LLVMContext &context, const TacProgram &program,
+                const TacStatement *stmt) {
+    if (stmt == nullptr) {
+      return;
+    }
+
+    auto it = HadTail ? std::next(Tail) : Block.begin();
+    for (; it != Block.end(); ++it) {
+      attachStmtMetadata(*it, context, program, *stmt);
+    }
+  }
+
+ private:
+  llvm::BasicBlock &Block;
+  bool HadTail = false;
+  llvm::BasicBlock::iterator Tail;
+};
 
 llvm::APInt parseWordConstant(const std::string &text) {
   llvm::StringRef value(text);
@@ -413,6 +499,7 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
         return makeError("PHI has no def at " + stmt.Id);
       }
       auto *phi = builder.CreatePHI(wordType, 0, sanitizeLlvmName(def->second));
+      attachStmtMetadata(*phi, context, program, stmt);
       phiNodes[stmt.Id] = phi;
       values[def->second] = phi;
     }
@@ -429,25 +516,32 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
         continue;
       }
       if (stmt.Op == "CALLPRIVATE") {
+        InsertedInstructionAnnotator annotator(*builder.GetInsertBlock());
         if (auto error = lowerPrivateCall(program, function, block, stmt, llvmFunctions,
                                           instructionLowerer, handles, builder)) {
           return error;
         }
+        annotator.annotate(context, program, &stmt);
         continue;
       }
       if (stmt.Op == "RETURNPRIVATE") {
         continue;
       }
+      InsertedInstructionAnnotator annotator(*builder.GetInsertBlock());
       if (auto error = instructionLowerer.lower(stmt)) {
         return error;
       }
+      annotator.annotate(context, program, &stmt);
     }
 
+    InsertedInstructionAnnotator terminatorAnnotator(*builder.GetInsertBlock());
     if (auto error =
             lowerTerminator(program, function, block, llvmBlocks, values,
                             instructionLowerer, builder)) {
       return error;
     }
+    terminatorAnnotator.annotate(context, program,
+                                 terminatorMetadataStatement(block));
   }
 
   if (auto error = fillPhiIncoming(program, function, llvmBlocks, values,

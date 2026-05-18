@@ -77,6 +77,27 @@ llvm::Expected<Rows> loadOptionalRows(const std::string &dir,
   return loadRows(dir, fileName, expectedColumns);
 }
 
+std::vector<FactId> parseOriginalStatementList(const std::string &text) {
+  std::vector<FactId> result;
+  std::string token;
+  auto flushToken = [&]() {
+    if (!token.empty() && token != "nil") {
+      result.push_back(token);
+    }
+    token.clear();
+  };
+
+  for (char c : text) {
+    if (c == '[' || c == ']' || c == ',' || c == ' ' || c == '\t') {
+      flushToken();
+    } else {
+      token.push_back(c);
+    }
+  }
+  flushToken();
+  return result;
+}
+
 template <typename T>
 llvm::Error takeRows(llvm::Expected<Rows> rowsOrError, T &&fn) {
   if (!rowsOrError) {
@@ -134,6 +155,29 @@ llvm::Expected<TacProgram> loadFacts(const FactLoadConfig &config) {
                             [&](const auto &row) {
                               program.VariableValues[row[0]] = row[1];
                             })) {
+    return std::move(error);
+  }
+
+  if (auto error = takeRows(
+          loadOptionalRows(config.FactsDir, "TAC_Statement_OriginalStatement.csv", 2),
+          [&](const auto &row) {
+            program.OriginalStatementsByStmt[row[0]] = {row[1]};
+          })) {
+    return std::move(error);
+  }
+
+  if (auto error = takeRows(
+          loadOptionalRows(config.FactsDir, "TAC_Statement_OriginalStatementList.csv", 2),
+          [&](const auto &row) {
+            program.OriginalStatementsByStmt[row[0]] =
+                parseOriginalStatementList(row[1]);
+          })) {
+    return std::move(error);
+  }
+
+  if (auto error = takeRows(
+          loadOptionalRows(config.FactsDir, "TAC_Statement_InlineInfo.csv", 2),
+          [&](const auto &row) { program.InlineInfoByStmt[row[0]] = row[1]; })) {
     return std::move(error);
   }
 

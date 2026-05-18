@@ -63,6 +63,11 @@ struct TacProgram {
   std::map<FactId, TacBlock> Blocks;
   std::map<FactId, TacFunction> Functions;
   std::map<FactId, std::string> VariableValues;
+  // Original EVM statement ids exported by Gigahorse. These are kept separate
+  // from TAC ids because inlining can make one TAC statement correspond to a
+  // call stack of original bytecode PCs.
+  std::map<FactId, std::vector<FactId>> OriginalStatementsByStmt;
+  std::map<FactId, std::string> InlineInfoByStmt;
   std::map<FactId, PrivateCallInfo> PrivateCallsByBlock;
   bool HasPhiIncomingFacts = false;
   std::map<std::pair<FactId, FactId>, std::vector<PhiIncoming>> PhiIncomingByEdge;
