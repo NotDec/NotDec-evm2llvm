@@ -22,6 +22,8 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_calldatasize", wordType, ptrType);
   module.getOrInsertFunction("evm_calldatacopy", voidType, ptrType, ptrType,
                              wordType, wordType, wordType);
+  module.getOrInsertFunction("evm_codecopy", voidType, ptrType, ptrType,
+                             wordType, wordType, wordType);
   module.getOrInsertFunction("evm_returndatasize", wordType, ptrType);
   module.getOrInsertFunction("evm_returndatacopy", voidType, ptrType, ptrType,
                              wordType, wordType, wordType);
@@ -41,8 +43,13 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_delegatecall", wordType, ptrType, ptrType,
                              ptrType, wordType, wordType, wordType, wordType,
                              wordType, wordType);
+  module.getOrInsertFunction("evm_staticcall", wordType, ptrType, ptrType,
+                             ptrType, wordType, wordType, wordType, wordType,
+                             wordType, wordType);
   module.getOrInsertFunction("evm_callvalue", wordType, ptrType);
+  module.getOrInsertFunction("evm_address", wordType, ptrType);
   module.getOrInsertFunction("evm_caller", wordType, ptrType);
+  module.getOrInsertFunction("evm_extcodesize", wordType, ptrType, wordType);
   module.getOrInsertFunction("evm_timestamp", wordType, ptrType);
   module.getOrInsertFunction("evm_gas", wordType, ptrType);
   module.getOrInsertFunction("evm_div", wordType, wordType, wordType);

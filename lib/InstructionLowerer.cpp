@@ -214,7 +214,7 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     return Builder.CreateCall(runtimeFunction("evm_returndatasize"),
                               {Handles.Returndata}, "evm.returndatasize");
   }
-  if (stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
+  if (stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" || stmt.Op == "CALLER" ||
       stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
     if (!stmt.Uses.empty()) {
       return llvm::createStringError(std::errc::invalid_argument,
@@ -224,6 +224,10 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     if (stmt.Op == "CALLVALUE") {
       return Builder.CreateCall(runtimeFunction("evm_callvalue"), {Handles.Env},
                                 "evm.callvalue");
+    }
+    if (stmt.Op == "ADDRESS") {
+      return Builder.CreateCall(runtimeFunction("evm_address"), {Handles.Env},
+                                "evm.address");
     }
     if (stmt.Op == "CALLER") {
       return Builder.CreateCall(runtimeFunction("evm_caller"), {Handles.Env},
@@ -264,6 +268,10 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
   if (stmt.Op == "CALLDATALOAD") {
     return Builder.CreateCall(runtimeFunction("evm_calldataload"),
                               {Handles.Calldata, operand}, "evm.calldataload");
+  }
+  if (stmt.Op == "EXTCODESIZE") {
+    return Builder.CreateCall(runtimeFunction("evm_extcodesize"),
+                              {Handles.Env, operand}, "evm.extcodesize");
   }
 
   return unsupported(stmt);
@@ -307,6 +315,25 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     }
     auto *success = Builder.CreateCall(runtimeFunction("evm_delegatecall"), args,
                                        "evm.delegatecall");
+    return defineWord(stmt.Defs[0], success);
+  }
+  if (stmt.Op == "STATICCALL") {
+    if (stmt.Uses.size() != 6 || stmt.Defs.size() != 1) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "STATICCALL expects six operands and one def at %s", stmt.Id.c_str());
+    }
+    std::vector<llvm::Value *> args = {Handles.Mem, Handles.Returndata,
+                                       Handles.Env};
+    for (const auto &use : stmt.Uses) {
+      auto valueOrError = loadWord(use);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      args.push_back(*valueOrError);
+    }
+    auto *success = Builder.CreateCall(runtimeFunction("evm_staticcall"), args,
+                                       "evm.staticcall");
     return defineWord(stmt.Defs[0], success);
   }
 
@@ -353,6 +380,29 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     }
     Builder.CreateCall(runtimeFunction("evm_calldatacopy"),
                        {Handles.Mem, Handles.Calldata, *dstOrError, *srcOrError,
+                        *sizeOrError});
+    return llvm::Error::success();
+  }
+  if (stmt.Op == "CODECOPY") {
+    if (stmt.Uses.size() != 3) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "CODECOPY expects three operands at %s",
+                                     stmt.Id.c_str());
+    }
+    auto dstOrError = loadWord(stmt.Uses[0]);
+    if (!dstOrError) {
+      return dstOrError.takeError();
+    }
+    auto srcOrError = loadWord(stmt.Uses[1]);
+    if (!srcOrError) {
+      return srcOrError.takeError();
+    }
+    auto sizeOrError = loadWord(stmt.Uses[2]);
+    if (!sizeOrError) {
+      return sizeOrError.takeError();
+    }
+    Builder.CreateCall(runtimeFunction("evm_codecopy"),
+                       {Handles.Mem, Handles.Env, *dstOrError, *srcOrError,
                         *sizeOrError});
     return llvm::Error::success();
   }
@@ -452,10 +502,11 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   }
   if (stmt.Op == "MSTORE" || stmt.Op == "MSTORE8" || stmt.Op == "SSTORE" ||
       stmt.Op == "RETURN" || stmt.Op == "REVERT" ||
-      stmt.Op == "CALLDATACOPY" || stmt.Op == "RETURNDATACOPY" ||
+      stmt.Op == "CALLDATACOPY" || stmt.Op == "CODECOPY" ||
+      stmt.Op == "RETURNDATACOPY" ||
       stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
       stmt.Op == "LOG3" || stmt.Op == "LOG4" || stmt.Op == "CALL" ||
-      stmt.Op == "DELEGATECALL") {
+      stmt.Op == "DELEGATECALL" || stmt.Op == "STATICCALL") {
     return lowerStateWrite(stmt);
   }
 
@@ -495,8 +546,10 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   } else if (stmt.Op == "MLOAD" || stmt.Op == "SLOAD" ||
              stmt.Op == "CALLDATALOAD" || stmt.Op == "CALLDATASIZE" ||
              stmt.Op == "RETURNDATASIZE" ||
-             stmt.Op == "CALLVALUE" || stmt.Op == "CALLER" ||
-             stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
+             stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" ||
+             stmt.Op == "CALLER" ||
+             stmt.Op == "EXTCODESIZE" || stmt.Op == "TIMESTAMP" ||
+             stmt.Op == "GAS" || stmt.Op == "MSIZE") {
     auto valueOrError = lowerStateRead(stmt);
     if (!valueOrError) {
       return valueOrError.takeError();

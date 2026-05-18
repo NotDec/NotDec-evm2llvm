@@ -267,6 +267,18 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
                             std::map<FactId, llvm::Value *> &values,
                             InstructionLowerer &instructionLowerer,
                             llvm::IRBuilder<> &builder) {
+  const auto *terminal = terminalStatement(block);
+  if (terminal != nullptr) {
+    if (terminal->Op == "REVERT" || terminal->Op == "THROW") {
+      builder.CreateUnreachable();
+      return llvm::Error::success();
+    }
+    if (terminal->Op == "RETURN" || terminal->Op == "STOP") {
+      builder.CreateRetVoid();
+      return llvm::Error::success();
+    }
+  }
+
   std::vector<FactId> successors;
   for (const auto &successor : block.Successors) {
     if (containsBlock(function, successor)) {
@@ -275,11 +287,7 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
   }
 
   if (successors.empty()) {
-    const auto *terminal = terminalStatement(block);
-    if (terminal != nullptr &&
-        (terminal->Op == "REVERT" || terminal->Op == "THROW")) {
-      builder.CreateUnreachable();
-    } else if (terminal != nullptr && terminal->Op == "RETURNPRIVATE") {
+    if (terminal != nullptr && terminal->Op == "RETURNPRIVATE") {
       const auto &stmt = *terminal;
       if (stmt.Uses.size() != function.ReturnVars.size() + 1) {
         return makeError("RETURNPRIVATE return count mismatch at " + stmt.Id);
@@ -322,7 +330,6 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
     return makeError("block " + block.Id + " has more than two successors");
   }
 
-  const auto *terminal = terminalStatement(block);
   if (terminal == nullptr || terminal->Uses.empty()) {
     return makeError("conditional block " + block.Id + " has no condition use");
   }
