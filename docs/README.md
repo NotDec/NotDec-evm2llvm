@@ -43,3 +43,27 @@ compile Souffle programs. Enable them explicitly:
 cmake -S . -B build -G Ninja -DNOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS=ON
 ctest --test-dir build -R evm2llvm.gigahorse --output-on-failure
 ```
+
+## Gigahorse PHI Source Runs
+
+When investigating `PHIIncoming.csv` or other SSA facts, run Gigahorse with
+inlining disabled by default.
+
+At the moment, the inliner does not add much value for downstream
+decompilation, so it is disabled by default. This keeps the exported CFG and
+PHI sources closer to the original function boundaries, which makes it easier
+to tell whether a problem comes from:
+
+1. the original block-level PHI facts;
+2. an inline rewrite that changed the return edge;
+3. a later lowering rule that guessed a value after the fact.
+
+The wrapper accepts extra Gigahorse flags, so the common form is:
+
+```bash
+scripts/notdec-evm2llvm.py contract.hex -o contract.ll \
+  --evm2llvm /path/to/evm2llvm \
+  --gigahorse-extra-arg=--disable_inline
+```
+
+Only enable inlining when the test goal is specifically about inline behavior.
