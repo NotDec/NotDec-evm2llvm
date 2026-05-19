@@ -76,6 +76,7 @@ EVM_OPCODES = {
     0x59: "MSIZE",
     0x5A: "GAS",
     0x5B: "JUMPDEST",
+    0x5E: "MCOPY",
     0x5F: "PUSH0",
     0xF0: "CREATE",
     0xF1: "CALL",

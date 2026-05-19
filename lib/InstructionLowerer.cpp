@@ -205,6 +205,15 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     return Builder.CreateCall(runtimeFunction("evm_calldatasize"),
                               {Handles.Calldata}, "evm.calldatasize");
   }
+  if (stmt.Op == "CODESIZE") {
+    if (!stmt.Uses.empty()) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "CODESIZE expects no operands at %s",
+                                     stmt.Id.c_str());
+    }
+    return Builder.CreateCall(runtimeFunction("evm_codesize"), {Handles.Env},
+                              "evm.codesize");
+  }
   if (stmt.Op == "RETURNDATASIZE") {
     if (!stmt.Uses.empty()) {
       return llvm::createStringError(
@@ -215,7 +224,8 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
                               {Handles.Returndata}, "evm.returndatasize");
   }
   if (stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" || stmt.Op == "CALLER" ||
-      stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" || stmt.Op == "MSIZE") {
+      stmt.Op == "ORIGIN" || stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" ||
+      stmt.Op == "NUMBER" || stmt.Op == "MSIZE" || stmt.Op == "SELFBALANCE") {
     if (!stmt.Uses.empty()) {
       return llvm::createStringError(std::errc::invalid_argument,
                                      "%s expects no operands at %s", stmt.Op.c_str(),
@@ -233,13 +243,25 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
       return Builder.CreateCall(runtimeFunction("evm_caller"), {Handles.Env},
                                 "evm.caller");
     }
+    if (stmt.Op == "ORIGIN") {
+      return Builder.CreateCall(runtimeFunction("evm_origin"), {Handles.Env},
+                                "evm.origin");
+    }
     if (stmt.Op == "TIMESTAMP") {
       return Builder.CreateCall(runtimeFunction("evm_timestamp"), {Handles.Env},
                                 "evm.timestamp");
     }
+    if (stmt.Op == "NUMBER") {
+      return Builder.CreateCall(runtimeFunction("evm_number"), {Handles.Env},
+                                "evm.number");
+    }
     if (stmt.Op == "GAS") {
       return Builder.CreateCall(runtimeFunction("evm_gas"), {Handles.Env},
                                 "evm.gas");
+    }
+    if (stmt.Op == "SELFBALANCE") {
+      return Builder.CreateCall(runtimeFunction("evm_selfbalance"), {Handles.Env},
+                                "evm.selfbalance");
     }
     return Builder.CreateCall(runtimeFunction("evm_msize"), {Handles.Mem},
                               "evm.msize");
@@ -264,6 +286,10 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
   if (stmt.Op == "SLOAD") {
     return Builder.CreateCall(runtimeFunction("evm_sload"), {operand},
                               "evm.sload");
+  }
+  if (stmt.Op == "BALANCE") {
+    return Builder.CreateCall(runtimeFunction("evm_balance"),
+                              {Handles.Env, operand}, "evm.balance");
   }
   if (stmt.Op == "CALLDATALOAD") {
     return Builder.CreateCall(runtimeFunction("evm_calldataload"),
@@ -357,6 +383,44 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     }
     Builder.CreateCall(runtimeFunction(("evm_log" + std::to_string(topicCount)).c_str()),
                        args);
+    return llvm::Error::success();
+  }
+
+  if (stmt.Op == "SELFDESTRUCT") {
+    if (stmt.Uses.size() != 1) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "SELFDESTRUCT expects one operand at %s",
+                                     stmt.Id.c_str());
+    }
+    auto beneficiaryOrError = loadWord(stmt.Uses[0]);
+    if (!beneficiaryOrError) {
+      return beneficiaryOrError.takeError();
+    }
+    Builder.CreateCall(runtimeFunction("evm_selfdestruct"),
+                       {Handles.Env, *beneficiaryOrError});
+    return llvm::Error::success();
+  }
+
+  if (stmt.Op == "MCOPY") {
+    if (stmt.Uses.size() != 3) {
+      return llvm::createStringError(std::errc::invalid_argument,
+                                     "MCOPY expects three operands at %s",
+                                     stmt.Id.c_str());
+    }
+    auto dstOrError = loadWord(stmt.Uses[0]);
+    if (!dstOrError) {
+      return dstOrError.takeError();
+    }
+    auto srcOrError = loadWord(stmt.Uses[1]);
+    if (!srcOrError) {
+      return srcOrError.takeError();
+    }
+    auto sizeOrError = loadWord(stmt.Uses[2]);
+    if (!sizeOrError) {
+      return sizeOrError.takeError();
+    }
+    Builder.CreateCall(runtimeFunction("evm_mcopy"),
+                       {Handles.Mem, *dstOrError, *srcOrError, *sizeOrError});
     return llvm::Error::success();
   }
 
@@ -502,11 +566,13 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
   }
   if (stmt.Op == "MSTORE" || stmt.Op == "MSTORE8" || stmt.Op == "SSTORE" ||
       stmt.Op == "RETURN" || stmt.Op == "REVERT" ||
+      stmt.Op == "MCOPY" ||
       stmt.Op == "CALLDATACOPY" || stmt.Op == "CODECOPY" ||
       stmt.Op == "RETURNDATACOPY" ||
       stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
       stmt.Op == "LOG3" || stmt.Op == "LOG4" || stmt.Op == "CALL" ||
-      stmt.Op == "DELEGATECALL" || stmt.Op == "STATICCALL") {
+      stmt.Op == "DELEGATECALL" || stmt.Op == "STATICCALL" ||
+      stmt.Op == "SELFDESTRUCT") {
     return lowerStateWrite(stmt);
   }
 
@@ -544,12 +610,15 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
     }
     value = *valueOrError;
   } else if (stmt.Op == "MLOAD" || stmt.Op == "SLOAD" ||
+             stmt.Op == "BALANCE" ||
              stmt.Op == "CALLDATALOAD" || stmt.Op == "CALLDATASIZE" ||
+             stmt.Op == "CODESIZE" ||
              stmt.Op == "RETURNDATASIZE" ||
              stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" ||
-             stmt.Op == "CALLER" ||
+             stmt.Op == "CALLER" || stmt.Op == "ORIGIN" ||
              stmt.Op == "EXTCODESIZE" || stmt.Op == "TIMESTAMP" ||
-             stmt.Op == "GAS" || stmt.Op == "MSIZE") {
+             stmt.Op == "NUMBER" || stmt.Op == "GAS" || stmt.Op == "MSIZE" ||
+             stmt.Op == "SELFBALANCE") {
     auto valueOrError = lowerStateRead(stmt);
     if (!valueOrError) {
       return valueOrError.takeError();
