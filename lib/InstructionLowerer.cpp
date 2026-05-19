@@ -194,6 +194,36 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerBinary(
   return unsupported(stmt);
 }
 
+llvm::Expected<llvm::Value *> InstructionLowerer::lowerTernary(
+    const TacStatement &stmt) {
+  if (stmt.Uses.size() != 3) {
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "%s expects three operands at %s", stmt.Op.c_str(),
+                                   stmt.Id.c_str());
+  }
+
+  std::vector<llvm::Value *> operands;
+  operands.reserve(stmt.Uses.size());
+  for (const auto &use : stmt.Uses) {
+    auto valueOrError = loadWord(use);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    operands.push_back(*valueOrError);
+  }
+
+  if (stmt.Op == "ADDMOD") {
+    return Builder.CreateCall(runtimeFunction("evm_addmod"), operands,
+                              "evm.addmod");
+  }
+  if (stmt.Op == "MULMOD") {
+    return Builder.CreateCall(runtimeFunction("evm_mulmod"), operands,
+                              "evm.mulmod");
+  }
+
+  return unsupported(stmt);
+}
+
 llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     const TacStatement &stmt) {
   if (stmt.Op == "CALLDATASIZE") {
@@ -605,6 +635,12 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
              stmt.Op == "SHL" || stmt.Op == "SHR" || stmt.Op == "SAR" ||
              stmt.Op == "SHA3") {
     auto valueOrError = lowerBinary(stmt);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    value = *valueOrError;
+  } else if (stmt.Op == "ADDMOD" || stmt.Op == "MULMOD") {
+    auto valueOrError = lowerTernary(stmt);
     if (!valueOrError) {
       return valueOrError.takeError();
     }

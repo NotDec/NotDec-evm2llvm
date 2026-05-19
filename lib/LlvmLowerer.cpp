@@ -33,6 +33,21 @@ bool containsBlock(const TacFunction &function, const FactId &blockId) {
          function.Blocks.end();
 }
 
+bool hasFunctionPredecessor(const TacProgram &program, const TacFunction &function,
+                            const FactId &blockId) {
+  for (const auto &predId : function.Blocks) {
+    auto block = program.Blocks.find(predId);
+    if (block == program.Blocks.end()) {
+      continue;
+    }
+    if (std::find(block->second.Successors.begin(), block->second.Successors.end(),
+                  blockId) != block->second.Successors.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void appendPostorder(const TacProgram &program, const TacFunction &function,
                      const FactId &blockId, std::set<FactId> &visited,
                      std::vector<FactId> &postorder) {
@@ -261,6 +276,63 @@ llvm::Error fillPhiIncoming(const TacProgram &program, const TacFunction &functi
   return llvm::Error::success();
 }
 
+llvm::Expected<llvm::Value *> entryPhiSeedValue(
+    llvm::LLVMContext &context, const TacProgram &program, const TacFunction &function,
+    const std::map<FactId, llvm::Value *> &values, const TacStatement &stmt) {
+  std::set<FactId> edgeVars;
+  for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
+    if (edge.second != function.EntryBlock || !containsBlock(function, edge.first)) {
+      continue;
+    }
+    for (const auto &incoming : incomingList) {
+      if (incoming.PhiStmt == stmt.Id) {
+        edgeVars.insert(incoming.Var);
+      }
+    }
+  }
+
+  std::vector<FactId> candidates;
+  for (const auto &use : stmt.Uses) {
+    if (edgeVars.count(use) == 0) {
+      candidates.push_back(use);
+    }
+  }
+  if (candidates.size() != 1) {
+    return makeError("entry PHI " + stmt.Id + " needs one initial value, found " +
+                     std::to_string(candidates.size()));
+  }
+  return valueForPhiIncoming(context, program, values, candidates[0]);
+}
+
+llvm::Error fillSyntheticEntryPhiIncoming(
+    const TacProgram &program, const TacFunction &function,
+    llvm::BasicBlock *syntheticEntryBlock,
+    const std::map<FactId, llvm::Value *> &values, const PhiNodeMap &phiNodes,
+    llvm::LLVMContext &context) {
+  if (syntheticEntryBlock == nullptr) {
+    return llvm::Error::success();
+  }
+
+  const auto &entryBlock = program.Blocks.at(function.EntryBlock);
+  for (const auto &stmt : entryBlock.Statements) {
+    if (stmt.Op != "PHI") {
+      continue;
+    }
+
+    auto phi = phiNodes.find(stmt.Id);
+    if (phi == phiNodes.end()) {
+      continue;
+    }
+
+    auto valueOrError = entryPhiSeedValue(context, program, function, values, stmt);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    phi->second->addIncoming(*valueOrError, syntheticEntryBlock);
+  }
+  return llvm::Error::success();
+}
+
 llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &function,
                             const TacBlock &block,
                             std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
@@ -444,6 +516,14 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   }
 
   std::map<FactId, llvm::BasicBlock *> llvmBlocks;
+  llvm::BasicBlock *syntheticEntryBlock = nullptr;
+  if (hasFunctionPredecessor(program, function, function.EntryBlock)) {
+    // LLVM forbids predecessors on the function entry block. Gigahorse can use a
+    // real entry block as a loop header, so keep that block and jump to it from
+    // a synthetic LLVM-only entry.
+    syntheticEntryBlock =
+        llvm::BasicBlock::Create(context, "entry", llvmFunction);
+  }
   for (const auto &blockId : functionBlockLoweringOrder(program, function)) {
     if (!program.Blocks.count(blockId)) {
       return makeError("function " + function.Id + " references missing block " + blockId);
@@ -454,6 +534,11 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
 
   if (!llvmBlocks.count(function.EntryBlock)) {
     return makeError("function " + function.Id + " entry block is missing");
+  }
+
+  if (syntheticEntryBlock != nullptr) {
+    llvm::IRBuilder<> builder(syntheticEntryBlock);
+    builder.CreateBr(llvmBlocks[function.EntryBlock]);
   }
 
   llvm::IRBuilder<> entryBuilder(llvmBlocks[function.EntryBlock]);
@@ -553,6 +638,11 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
 
   if (auto error = fillPhiIncoming(program, function, llvmBlocks, values,
                                    phiNodes, context)) {
+    return error;
+  }
+  if (auto error = fillSyntheticEntryPhiIncoming(program, function,
+                                                 syntheticEntryBlock, values,
+                                                 phiNodes, context)) {
     return error;
   }
   return llvm::Error::success();

@@ -43,6 +43,7 @@ class InstructionLowerer {
  private:
   llvm::Expected<llvm::Value *> lowerUnary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerBinary(const TacStatement &stmt);
+  llvm::Expected<llvm::Value *> lowerTernary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerStateRead(const TacStatement &stmt);
   llvm::Error lowerStateWrite(const TacStatement &stmt);
   llvm::Value *boolToWord(llvm::Value *value);

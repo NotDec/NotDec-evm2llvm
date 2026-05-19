@@ -64,6 +64,8 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_sdiv", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_mod", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_smod", wordType, wordType, wordType);
+  module.getOrInsertFunction("evm_addmod", wordType, wordType, wordType, wordType);
+  module.getOrInsertFunction("evm_mulmod", wordType, wordType, wordType, wordType);
   module.getOrInsertFunction("evm_exp", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_signextend", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_byte", wordType, wordType, wordType);
