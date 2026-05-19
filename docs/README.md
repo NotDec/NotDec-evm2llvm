@@ -63,7 +63,10 @@ The wrapper accepts extra Gigahorse flags, so the common form is:
 ```bash
 scripts/notdec-evm2llvm.py contract.hex -o contract.ll \
   --evm2llvm /path/to/evm2llvm \
+  --gigahorse-extra-arg=--restart \
   --gigahorse-extra-arg=--disable_inline
 ```
 
 Only enable inlining when the test goal is specifically about inline behavior.
+When re-running PHI investigations, keep `--restart` on so the new export does
+not silently reuse an older work directory.

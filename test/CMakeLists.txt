@@ -56,6 +56,7 @@ if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
         --work-dir "${work_dir}"
         --timeout-secs 180
         --gigahorse-extra-arg=-i
+        --gigahorse-extra-arg=--restart
         --gigahorse-extra-arg=--disable_inline
         --gigahorse-extra-arg=--disable_scalable_fallback
     )
