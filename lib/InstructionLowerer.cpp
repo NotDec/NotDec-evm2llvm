@@ -255,7 +255,8 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
   }
   if (stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" || stmt.Op == "CALLER" ||
       stmt.Op == "ORIGIN" || stmt.Op == "TIMESTAMP" || stmt.Op == "GAS" ||
-      stmt.Op == "NUMBER" || stmt.Op == "MSIZE" || stmt.Op == "SELFBALANCE") {
+      stmt.Op == "NUMBER" || stmt.Op == "CHAINID" || stmt.Op == "MSIZE" ||
+      stmt.Op == "SELFBALANCE") {
     if (!stmt.Uses.empty()) {
       return llvm::createStringError(std::errc::invalid_argument,
                                      "%s expects no operands at %s", stmt.Op.c_str(),
@@ -284,6 +285,10 @@ llvm::Expected<llvm::Value *> InstructionLowerer::lowerStateRead(
     if (stmt.Op == "NUMBER") {
       return Builder.CreateCall(runtimeFunction("evm_number"), {Handles.Env},
                                 "evm.number");
+    }
+    if (stmt.Op == "CHAINID") {
+      return Builder.CreateCall(runtimeFunction("evm_chainid"), {Handles.Env},
+                                "evm.chainid");
     }
     if (stmt.Op == "GAS") {
       return Builder.CreateCall(runtimeFunction("evm_gas"), {Handles.Env},
@@ -391,6 +396,26 @@ llvm::Error InstructionLowerer::lowerStateWrite(const TacStatement &stmt) {
     auto *success = Builder.CreateCall(runtimeFunction("evm_staticcall"), args,
                                        "evm.staticcall");
     return defineWord(stmt.Defs[0], success);
+  }
+  if (stmt.Op == "CREATE2") {
+    if (stmt.Uses.size() != 4 || stmt.Defs.size() != 1) {
+      return llvm::createStringError(
+          std::errc::invalid_argument,
+          "CREATE2 expects four operands and one def at %s", stmt.Id.c_str());
+    }
+    // CREATE2 reads init code from memory and returns the created address.
+    // The helper also keeps account/state effects visible to later passes.
+    std::vector<llvm::Value *> args = {Handles.Mem, Handles.Env};
+    for (const auto &use : stmt.Uses) {
+      auto valueOrError = loadWord(use);
+      if (!valueOrError) {
+        return valueOrError.takeError();
+      }
+      args.push_back(*valueOrError);
+    }
+    auto *address = Builder.CreateCall(runtimeFunction("evm_create2"), args,
+                                       "evm.create2");
+    return defineWord(stmt.Defs[0], address);
   }
 
   if (stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
@@ -602,6 +627,7 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
       stmt.Op == "LOG0" || stmt.Op == "LOG1" || stmt.Op == "LOG2" ||
       stmt.Op == "LOG3" || stmt.Op == "LOG4" || stmt.Op == "CALL" ||
       stmt.Op == "DELEGATECALL" || stmt.Op == "STATICCALL" ||
+      stmt.Op == "CREATE2" ||
       stmt.Op == "SELFDESTRUCT") {
     return lowerStateWrite(stmt);
   }
@@ -653,8 +679,8 @@ llvm::Error InstructionLowerer::lower(const TacStatement &stmt) {
              stmt.Op == "CALLVALUE" || stmt.Op == "ADDRESS" ||
              stmt.Op == "CALLER" || stmt.Op == "ORIGIN" ||
              stmt.Op == "EXTCODESIZE" || stmt.Op == "TIMESTAMP" ||
-             stmt.Op == "NUMBER" || stmt.Op == "GAS" || stmt.Op == "MSIZE" ||
-             stmt.Op == "SELFBALANCE") {
+             stmt.Op == "NUMBER" || stmt.Op == "CHAINID" || stmt.Op == "GAS" ||
+             stmt.Op == "MSIZE" || stmt.Op == "SELFBALANCE") {
     auto valueOrError = lowerStateRead(stmt);
     if (!valueOrError) {
       return valueOrError.takeError();

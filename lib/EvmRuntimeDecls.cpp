@@ -57,9 +57,12 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_extcodesize", wordType, ptrType, wordType);
   module.getOrInsertFunction("evm_timestamp", wordType, ptrType);
   module.getOrInsertFunction("evm_number", wordType, ptrType);
+  module.getOrInsertFunction("evm_chainid", wordType, ptrType);
   module.getOrInsertFunction("evm_gas", wordType, ptrType);
   module.getOrInsertFunction("evm_selfbalance", wordType, ptrType);
   module.getOrInsertFunction("evm_selfdestruct", voidType, ptrType, wordType);
+  module.getOrInsertFunction("evm_create2", wordType, ptrType, ptrType,
+                             wordType, wordType, wordType, wordType);
   module.getOrInsertFunction("evm_div", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_sdiv", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_mod", wordType, wordType, wordType);
