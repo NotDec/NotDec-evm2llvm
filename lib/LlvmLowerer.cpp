@@ -108,7 +108,8 @@ const TacStatement *terminatorMetadataStatement(const TacBlock &block) {
 
   if (stmt->Op == "JUMP" || stmt->Op == "JUMPI" || stmt->Op == "STOP" ||
       stmt->Op == "THROW" || stmt->Op == "RETURNPRIVATE" ||
-      stmt->Op == "RETURN" || stmt->Op == "REVERT") {
+      stmt->Op == "RETURN" || stmt->Op == "REVERT" ||
+      stmt->Op == "INVALID") {
     return stmt;
   }
   return nullptr;
@@ -126,6 +127,17 @@ llvm::Type *returnTypeFor(llvm::LLVMContext &context,
   return llvm::StructType::get(context,
                                std::vector<llvm::Type *>(function.ReturnVars.size(),
                                                          wordType));
+}
+
+void createFallbackReturn(llvm::IRBuilder<> &builder,
+                          const TacFunction &function) {
+  if (function.ReturnVars.empty()) {
+    builder.CreateRetVoid();
+    return;
+  }
+
+  auto *returnType = returnTypeFor(builder.getContext(), function);
+  builder.CreateRet(llvm::PoisonValue::get(returnType));
 }
 
 llvm::Function *createFunctionPrototype(llvm::Module &module,
@@ -357,12 +369,13 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
                             llvm::IRBuilder<> &builder) {
   const auto *terminal = terminalStatement(block);
   if (terminal != nullptr) {
-    if (terminal->Op == "REVERT" || terminal->Op == "THROW") {
+    if (terminal->Op == "REVERT" || terminal->Op == "THROW" ||
+        terminal->Op == "INVALID") {
       builder.CreateUnreachable();
       return llvm::Error::success();
     }
     if (terminal->Op == "RETURN" || terminal->Op == "STOP") {
-      builder.CreateRetVoid();
+      createFallbackReturn(builder, function);
       return llvm::Error::success();
     }
   }
@@ -404,7 +417,7 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
         builder.CreateRet(aggregate);
       }
     } else {
-      builder.CreateRetVoid();
+      createFallbackReturn(builder, function);
     }
     return llvm::Error::success();
   }

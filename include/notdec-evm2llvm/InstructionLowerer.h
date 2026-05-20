@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/IR/IRBuilder.h"
@@ -46,6 +47,8 @@ class InstructionLowerer {
   llvm::Expected<llvm::Value *> lowerTernary(const TacStatement &stmt);
   llvm::Expected<llvm::Value *> lowerStateRead(const TacStatement &stmt);
   llvm::Error lowerStateWrite(const TacStatement &stmt);
+  llvm::Expected<std::vector<llvm::Value *>> loadOperands(const TacStatement &stmt,
+                                                          unsigned expectedCount);
   llvm::Value *boolToWord(llvm::Value *value);
   llvm::Function *runtimeFunction(const char *name);
 

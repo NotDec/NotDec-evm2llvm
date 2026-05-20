@@ -41,6 +41,7 @@ add_evm2llvm_fixture(phi_branch)
 add_evm2llvm_fixture(entry_loop)
 add_evm2llvm_fixture(entry_order)
 add_evm2llvm_fixture(jump_table)
+add_evm2llvm_fixture(opcode_coverage)
 
 if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
   function(add_evm2llvm_gigahorse_test name bytecode)

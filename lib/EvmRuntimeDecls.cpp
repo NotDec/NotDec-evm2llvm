@@ -20,6 +20,8 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_msize", wordType, ptrType);
   module.getOrInsertFunction("evm_sload", wordType, wordType);
   module.getOrInsertFunction("evm_sstore", voidType, wordType, wordType);
+  module.getOrInsertFunction("evm_tload", wordType, wordType);
+  module.getOrInsertFunction("evm_tstore", voidType, wordType, wordType);
   module.getOrInsertFunction("evm_balance", wordType, ptrType, wordType);
   module.getOrInsertFunction("evm_calldataload", wordType, ptrType, wordType);
   module.getOrInsertFunction("evm_calldatasize", wordType, ptrType);
@@ -28,6 +30,8 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_codesize", wordType, ptrType);
   module.getOrInsertFunction("evm_codecopy", voidType, ptrType, ptrType,
                              wordType, wordType, wordType);
+  module.getOrInsertFunction("evm_extcodecopy", voidType, ptrType, ptrType,
+                             wordType, wordType, wordType, wordType);
   module.getOrInsertFunction("evm_returndatasize", wordType, ptrType);
   module.getOrInsertFunction("evm_returndatacopy", voidType, ptrType, ptrType,
                              wordType, wordType, wordType);
@@ -55,14 +59,29 @@ void declareEvmRuntimeHelpers(llvm::Module &module) {
   module.getOrInsertFunction("evm_caller", wordType, ptrType);
   module.getOrInsertFunction("evm_origin", wordType, ptrType);
   module.getOrInsertFunction("evm_extcodesize", wordType, ptrType, wordType);
+  module.getOrInsertFunction("evm_extcodehash", wordType, ptrType, wordType);
+  module.getOrInsertFunction("evm_gasprice", wordType, ptrType);
+  module.getOrInsertFunction("evm_blockhash", wordType, ptrType, wordType);
+  module.getOrInsertFunction("evm_coinbase", wordType, ptrType);
   module.getOrInsertFunction("evm_timestamp", wordType, ptrType);
   module.getOrInsertFunction("evm_number", wordType, ptrType);
+  module.getOrInsertFunction("evm_prevrandao", wordType, ptrType);
+  module.getOrInsertFunction("evm_gaslimit", wordType, ptrType);
   module.getOrInsertFunction("evm_chainid", wordType, ptrType);
+  module.getOrInsertFunction("evm_basefee", wordType, ptrType);
+  module.getOrInsertFunction("evm_blobhash", wordType, ptrType, wordType);
+  module.getOrInsertFunction("evm_blobbasefee", wordType, ptrType);
   module.getOrInsertFunction("evm_gas", wordType, ptrType);
+  module.getOrInsertFunction("evm_pc", wordType, ptrType);
   module.getOrInsertFunction("evm_selfbalance", wordType, ptrType);
   module.getOrInsertFunction("evm_selfdestruct", voidType, ptrType, wordType);
+  module.getOrInsertFunction("evm_create", wordType, ptrType, ptrType,
+                             wordType, wordType, wordType);
   module.getOrInsertFunction("evm_create2", wordType, ptrType, ptrType,
                              wordType, wordType, wordType, wordType);
+  module.getOrInsertFunction("evm_callcode", wordType, ptrType, ptrType,
+                             ptrType, wordType, wordType, wordType, wordType,
+                             wordType, wordType, wordType);
   module.getOrInsertFunction("evm_div", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_sdiv", wordType, wordType, wordType);
   module.getOrInsertFunction("evm_mod", wordType, wordType, wordType);
