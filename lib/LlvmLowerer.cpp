@@ -248,17 +248,11 @@ llvm::Expected<llvm::ConstantInt *> blockIdConstant(llvm::LLVMContext &context,
 
 llvm::Expected<unsigned> jumpiConditionUseIndex(
     const TacBlock &block, const TacStatement &terminal) {
-  if (terminal.Uses.empty()) {
-    return makeError("conditional block " + block.Id + " has no condition use");
-  }
-  if (terminal.Uses.size() == 1) {
-    return 0U;
-  }
   if (terminal.Uses.size() == 2) {
     return 1U;
   }
   return makeError("conditional block " + block.Id +
-                   " has unexpected JUMPI use count");
+                   " must have destination and condition uses");
 }
 
 llvm::Expected<llvm::Value *> valueForPhiIncoming(
