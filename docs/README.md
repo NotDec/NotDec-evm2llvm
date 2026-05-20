@@ -44,6 +44,14 @@ cmake -S . -B build -G Ninja -DNOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS=ON
 ctest --test-dir build -R evm2llvm.gigahorse --output-on-failure
 ```
 
+## Apehex Batch Loop
+
+The small batch loop used during `apehex_evm_contracts` reruns now lives in
+`/sn640/NotDecChainExp/evm2llvm_apehex_pilot/docs/apehex_batch_loop.md`.
+
+It documents the helper script, the rerun flow for prior failures, and the
+expected run-directory layout.
+
 ## Gigahorse PHI Source Runs
 
 When investigating `PHIIncoming.csv` or other SSA facts, run Gigahorse with
