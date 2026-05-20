@@ -257,6 +257,7 @@ bool isConcreteSuccessorValue(llvm::Value *value,
   for (const auto &successor : successors) {
     auto successorConstantOrError = blockIdConstant(context, successor);
     if (!successorConstantOrError) {
+      llvm::consumeError(successorConstantOrError.takeError());
       continue;
     }
     if ((*successorConstantOrError)->getValue() == constant->getValue()) {
