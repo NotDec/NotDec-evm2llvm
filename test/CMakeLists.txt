@@ -42,6 +42,16 @@ add_evm2llvm_fixture(entry_loop)
 add_evm2llvm_fixture(entry_order)
 add_evm2llvm_fixture(jump_table)
 add_evm2llvm_fixture(opcode_coverage)
+add_evm2llvm_fixture(jumpi_condition)
+
+add_test(
+  NAME evm2llvm.fixture.jumpi_condition.check-branch
+  COMMAND /bin/sh -c "grep -Fq 'br i1 false, label %bb._0x10, label %bb._0x20' '${CMAKE_CURRENT_BINARY_DIR}/jumpi_condition.ll'"
+)
+set_tests_properties(
+  evm2llvm.fixture.jumpi_condition.check-branch
+  PROPERTIES DEPENDS evm2llvm.fixture.jumpi_condition.emit
+)
 
 if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
   function(add_evm2llvm_gigahorse_test name bytecode)

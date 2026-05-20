@@ -246,6 +246,63 @@ llvm::Expected<llvm::ConstantInt *> blockIdConstant(llvm::LLVMContext &context,
   return llvm::ConstantInt::get(context, parsed);
 }
 
+bool isConcreteSuccessorValue(llvm::Value *value,
+                              const std::vector<FactId> &successors,
+                              llvm::LLVMContext &context) {
+  auto *constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+  if (constant == nullptr) {
+    return false;
+  }
+
+  for (const auto &successor : successors) {
+    auto successorConstantOrError = blockIdConstant(context, successor);
+    if (!successorConstantOrError) {
+      continue;
+    }
+    if ((*successorConstantOrError)->getValue() == constant->getValue()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+llvm::Expected<unsigned> jumpiConditionUseIndex(
+    const TacBlock &block, const std::vector<FactId> &successors,
+    const TacStatement &terminal, InstructionLowerer &instructionLowerer,
+    llvm::LLVMContext &context) {
+  if (terminal.Uses.empty()) {
+    return makeError("conditional block " + block.Id + " has no condition use");
+  }
+  if (terminal.Uses.size() == 1) {
+    return 0U;
+  }
+
+  // Some Gigahorse exports keep the jump destination in the TAC use list and
+  // some only keep the condition. When both are present, prefer the operand
+  // that does not look like a concrete successor block id.
+  std::optional<unsigned> targetUseIndex;
+  for (unsigned i = 0; i < terminal.Uses.size(); ++i) {
+    auto valueOrError = instructionLowerer.loadWord(terminal.Uses[i]);
+    if (!valueOrError) {
+      return valueOrError.takeError();
+    }
+    if (isConcreteSuccessorValue(*valueOrError, successors, context)) {
+      targetUseIndex = i;
+      break;
+    }
+  }
+
+  if (targetUseIndex.has_value()) {
+    for (unsigned i = 0; i < terminal.Uses.size(); ++i) {
+      if (i != *targetUseIndex) {
+        return i;
+      }
+    }
+  }
+
+  return static_cast<unsigned>(terminal.Uses.size() - 1);
+}
+
 llvm::Expected<llvm::Value *> valueForPhiIncoming(
     llvm::LLVMContext &context, const TacProgram &program,
     const std::map<FactId, llvm::Value *> &values, const FactId &var) {
@@ -463,11 +520,15 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
                      " is not JUMPI or dynamic JUMP");
   }
 
-  if (terminal->Uses.empty()) {
-    return makeError("conditional block " + block.Id + " has no condition use");
+  auto conditionUseIndexOrError =
+      jumpiConditionUseIndex(block, successors, *terminal, instructionLowerer,
+                             builder.getContext());
+  if (!conditionUseIndexOrError) {
+    return conditionUseIndexOrError.takeError();
   }
 
-  auto conditionOrError = instructionLowerer.loadWord(terminal->Uses[0]);
+  auto conditionOrError =
+      instructionLowerer.loadWord(terminal->Uses[*conditionUseIndexOrError]);
   if (!conditionOrError) {
     return conditionOrError.takeError();
   }
