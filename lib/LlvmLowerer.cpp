@@ -16,6 +16,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "notdec-evm2llvm/EvmRuntimeDecls.h"
 #include "notdec-evm2llvm/InstructionLowerer.h"
@@ -405,6 +406,12 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
       } else {
         auto *returnType = llvm::cast<llvm::StructType>(
             returnTypeFor(builder.getContext(), function));
+        llvm::errs() << "warning: evm2llvm emits poison seed for multi-value "
+                        "RETURNPRIVATE in function "
+                     << function.Id << " block " << block.Id << " statement "
+                     << stmt.Id
+                     << "; check whether all return aggregate fields are "
+                        "defined\n";
         llvm::Value *aggregate = llvm::PoisonValue::get(returnType);
         for (unsigned i = 0; i < function.ReturnVars.size(); ++i) {
           auto valueOrError = instructionLowerer.loadWord(stmt.Uses[i + 1]);

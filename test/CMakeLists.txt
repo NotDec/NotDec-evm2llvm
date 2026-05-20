@@ -45,6 +45,11 @@ add_evm2llvm_fixture(opcode_coverage)
 add_evm2llvm_fixture(jumpi_condition)
 
 add_test(
+  NAME evm2llvm.fixture.private_call_multi_return.check-poison-warning
+  COMMAND /bin/sh -c "$<TARGET_FILE:evm2llvm> --facts '${CMAKE_CURRENT_SOURCE_DIR}/fixtures/private_call_multi_return' --output '${CMAKE_CURRENT_BINARY_DIR}/private_call_multi_return.warning.ll' 2>&1 | grep -Fq 'warning: evm2llvm emits poison seed for multi-value RETURNPRIVATE'"
+)
+
+add_test(
   NAME evm2llvm.fixture.jumpi_condition.check-branch
   COMMAND /bin/sh -c "grep -Fq 'br i1 false, label %bb._0x10, label %bb._0x20' '${CMAKE_CURRENT_BINARY_DIR}/jumpi_condition.ll'"
 )
