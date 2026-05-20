@@ -91,26 +91,17 @@ std::string functionName(const TacFunction &function) {
          sanitizeLlvmName(function.Name + "_" + function.Id);
 }
 
-const TacStatement *terminalStatement(const TacBlock &block) {
-  for (auto it = block.Statements.rbegin(); it != block.Statements.rend(); ++it) {
-    if (it->Op != "PHI") {
-      return &*it;
-    }
-  }
-  return nullptr;
+bool isTerminatorOp(const std::string &op) {
+  return op == "JUMP" || op == "JUMPI" || op == "STOP" ||
+         op == "THROW" || op == "RETURNPRIVATE" || op == "RETURN" ||
+         op == "REVERT" || op == "INVALID";
 }
 
-const TacStatement *terminatorMetadataStatement(const TacBlock &block) {
-  const auto *stmt = terminalStatement(block);
-  if (stmt == nullptr) {
-    return nullptr;
-  }
-
-  if (stmt->Op == "JUMP" || stmt->Op == "JUMPI" || stmt->Op == "STOP" ||
-      stmt->Op == "THROW" || stmt->Op == "RETURNPRIVATE" ||
-      stmt->Op == "RETURN" || stmt->Op == "REVERT" ||
-      stmt->Op == "INVALID") {
-    return stmt;
+const TacStatement *terminalStatement(const TacBlock &block) {
+  for (auto it = block.Statements.rbegin(); it != block.Statements.rend(); ++it) {
+    if (isTerminatorOp(it->Op)) {
+      return &*it;
+    }
   }
   return nullptr;
 }
@@ -129,15 +120,16 @@ llvm::Type *returnTypeFor(llvm::LLVMContext &context,
                                                          wordType));
 }
 
-void createFallbackReturn(llvm::IRBuilder<> &builder,
-                          const TacFunction &function) {
+llvm::Error createFallbackReturn(llvm::IRBuilder<> &builder,
+                                 const TacFunction &function,
+                                 const TacBlock &block) {
   if (function.ReturnVars.empty()) {
     builder.CreateRetVoid();
-    return;
+    return llvm::Error::success();
   }
 
-  auto *returnType = returnTypeFor(builder.getContext(), function);
-  builder.CreateRet(llvm::PoisonValue::get(returnType));
+  return makeError("block " + block.Id + " in non-void function " +
+                   function.Id + " has no RETURNPRIVATE terminator");
 }
 
 llvm::Function *createFunctionPrototype(llvm::Module &module,
@@ -375,8 +367,7 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
       return llvm::Error::success();
     }
     if (terminal->Op == "RETURN" || terminal->Op == "STOP") {
-      createFallbackReturn(builder, function);
-      return llvm::Error::success();
+      return createFallbackReturn(builder, function, block);
     }
   }
 
@@ -417,7 +408,9 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
         builder.CreateRet(aggregate);
       }
     } else {
-      createFallbackReturn(builder, function);
+      if (auto error = createFallbackReturn(builder, function, block)) {
+        return error;
+      }
     }
     return llvm::Error::success();
   }
@@ -700,8 +693,7 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
                             instructionLowerer, builder)) {
       return error;
     }
-    terminatorAnnotator.annotate(context, program,
-                                 terminatorMetadataStatement(block));
+    terminatorAnnotator.annotate(context, program, terminalStatement(block));
   }
 
   if (auto error = fillPhiIncoming(program, function, llvmBlocks, values,
