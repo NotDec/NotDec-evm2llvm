@@ -226,6 +226,22 @@ llvm::APInt parseWordConstant(const std::string &text) {
   return llvm::APInt(256, value, radix);
 }
 
+llvm::Expected<llvm::ConstantInt *> blockIdConstant(llvm::LLVMContext &context,
+                                                    const FactId &blockId) {
+  llvm::StringRef value(blockId);
+  unsigned radix = 10;
+  if (value.consume_front("0x") || value.consume_front("0X")) {
+    radix = 16;
+  }
+
+  llvm::APInt parsed(256, 0);
+  if (value.getAsInteger(radix, parsed)) {
+    return makeError("dynamic JUMP successor is not a concrete block id: " +
+                     blockId);
+  }
+  return llvm::ConstantInt::get(context, parsed);
+}
+
 llvm::Expected<llvm::Value *> valueForPhiIncoming(
     llvm::LLVMContext &context, const TacProgram &program,
     const std::map<FactId, llvm::Value *> &values, const FactId &var) {
@@ -398,11 +414,50 @@ llvm::Error lowerTerminator(const TacProgram &program, const TacFunction &functi
     return llvm::Error::success();
   }
 
+  if (terminal != nullptr && terminal->Op == "JUMP") {
+    if (terminal->Uses.size() != 1) {
+      return makeError("dynamic JUMP block " + block.Id +
+                       " must have one target use");
+    }
+    auto targetOrError = instructionLowerer.loadWord(terminal->Uses[0]);
+    if (!targetOrError) {
+      return targetOrError.takeError();
+    }
+
+    // Gigahorse reports possible dynamic JUMP targets as CFG successors. Lower
+    // them as a switch on the target address, keeping the original block as the
+    // PHI predecessor for every outgoing edge.
+    auto *function = builder.GetInsertBlock()->getParent();
+    auto *defaultBlock =
+        llvm::BasicBlock::Create(builder.getContext(),
+                                 "bb." + sanitizeLlvmName(block.Id) +
+                                     ".bad_jump",
+                                 function);
+    auto *switchInst =
+        builder.CreateSwitch(*targetOrError, defaultBlock, successors.size());
+    for (const auto &successor : successors) {
+      auto caseValueOrError = blockIdConstant(builder.getContext(), successor);
+      if (!caseValueOrError) {
+        return caseValueOrError.takeError();
+      }
+      switchInst->addCase(*caseValueOrError, llvmBlocks[successor]);
+    }
+
+    llvm::IRBuilder<> defaultBuilder(defaultBlock);
+    defaultBuilder.CreateUnreachable();
+    return llvm::Error::success();
+  }
+
   if (successors.size() != 2) {
     return makeError("block " + block.Id + " has more than two successors");
   }
 
-  if (terminal == nullptr || terminal->Uses.empty()) {
+  if (terminal == nullptr || terminal->Op != "JUMPI") {
+    return makeError("multi-successor block " + block.Id +
+                     " is not JUMPI or dynamic JUMP");
+  }
+
+  if (terminal->Uses.empty()) {
     return makeError("conditional block " + block.Id + " has no condition use");
   }
 
