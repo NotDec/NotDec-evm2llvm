@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -24,6 +25,12 @@
 
 namespace notdec::evm2llvm {
 namespace {
+
+// EVM module headers need to match the layout used by solx and other EVM
+// LLVM IR consumers. The 256-bit pointer width is intentional here because
+// EVM addresses and memory offsets are modeled as 256-bit words in the IR.
+constexpr const char *kEvmTargetTriple = "evm-unknown-unknown";
+constexpr const char *kEvmDataLayout = "E-p:256:256-i256:256:256-S256-a:256:256";
 
 llvm::Error makeError(const std::string &message) {
   return llvm::createStringError(std::errc::invalid_argument, "%s", message.c_str());
@@ -736,6 +743,8 @@ llvm::Expected<std::unique_ptr<llvm::Module>> lowerToLlvm(
   }
 
   auto module = std::make_unique<llvm::Module>(config.ModuleName, context);
+  module->setTargetTriple(llvm::Triple(kEvmTargetTriple));
+  module->setDataLayout(kEvmDataLayout);
   declareEvmRuntimeHelpers(*module);
 
   std::map<FactId, llvm::Function *> llvmFunctions;

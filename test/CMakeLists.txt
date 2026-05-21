@@ -23,6 +23,7 @@ function(add_evm2llvm_fixture name)
   add_test(
     NAME evm2llvm.fixture.${name}.opt-verify
     COMMAND "${NOTDEC_LLVM_INSTALL_DIR}/bin/opt"
+      -mtriple=unknown-unknown-unknown
       -passes=verify
       -disable-output
       "${output_bc}"
@@ -55,6 +56,15 @@ add_test(
 )
 set_tests_properties(
   evm2llvm.fixture.jumpi_condition.check-branch
+  PROPERTIES DEPENDS evm2llvm.fixture.jumpi_condition.emit
+)
+
+add_test(
+  NAME evm2llvm.fixture.jumpi_condition.check-target-header
+  COMMAND /bin/sh -c "grep -Fq 'target datalayout = \"E-p:256:256-i256:256:256-S256-a:256:256\"' '${CMAKE_CURRENT_BINARY_DIR}/jumpi_condition.ll' && grep -Fq 'target triple = \"evm-unknown-unknown\"' '${CMAKE_CURRENT_BINARY_DIR}/jumpi_condition.ll'"
+)
+set_tests_properties(
+  evm2llvm.fixture.jumpi_condition.check-target-header
   PROPERTIES DEPENDS evm2llvm.fixture.jumpi_condition.emit
 )
 
