@@ -52,3 +52,13 @@ utype_pool().size() 读 deque 的 _M_finish，与其它线程的 emplace_back（
 下一步应转向：
 1. TypeBuilder::convert:1085 的那条竞态（HType 侧共享状态）；
 2. 给 UType/CompactType/CompactVarSet 节点临时加 (creator_thread, seq) 标记，在崩溃点打印来源，确认是节点被复用改写还是指针被算错。
+
+## 追加排查（第二轮）：HType 侧那条竞态是 TSan/TBB 误报
+
+提取了 TypeBuilder.cpp:1085 和 HType.h:891 的报告，两条的冲突地址都是 "Location is stack of main thread"（0x7ffc... 栈地址），对手方是 TBB 的 wait_context/fold_tree（parallel_for 的栈上完成标记）。这是 TSan 对 TBB 栈标记的已知误报，不是我们的共享状态问题。
+
+因此到目前为止，我们代码里唯一确凿的竞态仍是 clear() 与 CompactType/CompactVarSet 读之间的那条；而"归档 typeStorage"的修复不充分，说明：
+- 要么需要一起保护 varState / canonicalize 中间态（不只 typeStorage），
+- 要么真正被读的 CompactType 属于另一个 arena 实例（跨 arena 共享 CompactTypePtr 的路径还没堵住）。
+
+下一步建议直接做"节点来源标记"实验：给 UType/CompactType 加 (creator_thread, arena_id, seq)，在崩溃点打印该节点及其 term 的来源，一次运行即可判定是节点被复用改写还是指针算错。
