@@ -10,6 +10,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -268,8 +269,9 @@ llvm::Expected<unsigned> jumpiConditionUseIndex(
 }
 
 llvm::Expected<llvm::Value *> valueForPhiIncoming(
-    llvm::LLVMContext &context, const TacProgram &program,
-    const std::map<FactId, llvm::Value *> &values, const FactId &var) {
+    llvm::LLVMContext &context, llvm::Type *wordType,
+    const TacProgram &program, const std::map<FactId, llvm::Value *> &values,
+    const FactId &var) {
   auto value = values.find(var);
   if (value != values.end()) {
     return value->second;
@@ -280,14 +282,20 @@ llvm::Expected<llvm::Value *> valueForPhiIncoming(
     return llvm::ConstantInt::get(context, parseWordConstant(constant->second));
   }
 
-  return makeError("missing SSA value for PHI incoming variable " + var);
+  // Gigahorse references a PHI variable that no TAC statement defines (the
+  // value is only known on some analysis paths).  The PHI still needs an
+  // incoming value for this edge, so seed it with undef and warn; dropping
+  // the whole module for one incomplete fact loses every other function.
+  llvm::errs() << "Warning: missing SSA value for PHI incoming variable "
+               << var << "; using undef for that edge\n";
+  return llvm::UndefValue::get(wordType);
 }
 
 llvm::Error fillPhiIncoming(const TacProgram &program, const TacFunction &function,
                             const std::map<FactId, llvm::BasicBlock *> &llvmBlocks,
                             const std::map<FactId, llvm::Value *> &values,
                             const PhiNodeMap &phiNodes,
-                            llvm::LLVMContext &context) {
+                            llvm::LLVMContext &context, llvm::Type *wordType) {
   for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
     if (!containsBlock(function, edge.first) || !containsBlock(function, edge.second)) {
       continue;
@@ -305,10 +313,23 @@ llvm::Error fillPhiIncoming(const TacProgram &program, const TacFunction &functi
                          incoming.PhiStmt);
       }
 
-      auto valueOrError =
-          valueForPhiIncoming(context, program, values, incoming.Var);
+      auto valueOrError = valueForPhiIncoming(context, wordType, program,
+                                              values, incoming.Var);
       if (!valueOrError) {
         return valueOrError.takeError();
+      }
+      // LLVM allows exactly one incoming value per predecessor.  When the
+      // entry block doubles as a loop header, the fact-level function-entry
+      // edge and the synthetic LLVM entry block both designate that block;
+      // the synthetic entry seed (added by
+      // fillSyntheticEntryPhiIncoming) already represents the function-entry
+      // value, so keep it and skip the duplicate edge.
+      if (phi->second->getBasicBlockIndex(predBlock->second) >= 0) {
+        llvm::errs() << "Warning: PHI " << incoming.PhiStmt
+                     << " already has an incoming value from predecessor "
+                     << edge.first
+                     << "; skipping the duplicate fact edge\n";
+        continue;
       }
       phi->second->addIncoming(*valueOrError, predBlock->second);
     }
@@ -318,7 +339,8 @@ llvm::Error fillPhiIncoming(const TacProgram &program, const TacFunction &functi
 }
 
 llvm::Expected<llvm::Value *> entryPhiSeedValue(
-    llvm::LLVMContext &context, const TacProgram &program, const TacFunction &function,
+    llvm::LLVMContext &context, llvm::Type *wordType,
+    const TacProgram &program, const TacFunction &function,
     const std::map<FactId, llvm::Value *> &values, const TacStatement &stmt) {
   std::set<FactId> edgeVars;
   for (const auto &[edge, incomingList] : program.PhiIncomingByEdge) {
@@ -342,14 +364,15 @@ llvm::Expected<llvm::Value *> entryPhiSeedValue(
     return makeError("entry PHI " + stmt.Id + " needs one initial value, found " +
                      std::to_string(candidates.size()));
   }
-  return valueForPhiIncoming(context, program, values, candidates[0]);
+  return valueForPhiIncoming(context, wordType, program, values,
+                             candidates[0]);
 }
 
 llvm::Error fillSyntheticEntryPhiIncoming(
     const TacProgram &program, const TacFunction &function,
     llvm::BasicBlock *syntheticEntryBlock,
     const std::map<FactId, llvm::Value *> &values, const PhiNodeMap &phiNodes,
-    llvm::LLVMContext &context) {
+    llvm::LLVMContext &context, llvm::Type *wordType) {
   if (syntheticEntryBlock == nullptr) {
     return llvm::Error::success();
   }
@@ -365,11 +388,34 @@ llvm::Error fillSyntheticEntryPhiIncoming(
       continue;
     }
 
-    auto valueOrError = entryPhiSeedValue(context, program, function, values, stmt);
+    auto valueOrError =
+        entryPhiSeedValue(context, wordType, program, function, values, stmt);
     if (!valueOrError) {
       return valueOrError.takeError();
     }
     phi->second->addIncoming(*valueOrError, syntheticEntryBlock);
+  }
+  return llvm::Error::success();
+}
+
+// Runs after both fact-level incomings and synthetic entry seeds are in
+// place.  Gigahorse only lists the edges whose value its analysis could name,
+// so a PHI can end up with fewer incoming values than its LLVM block has
+// predecessors, and LLVM requires exactly one per predecessor.  Fill the gaps
+// with undef and keep the module instead of failing the whole contract.
+llvm::Error completePhiIncoming(const PhiNodeMap &phiNodes,
+                                llvm::Type *wordType) {
+  for (const auto &[stmtId, phi] : phiNodes) {
+    llvm::BasicBlock *phiBlock = phi->getParent();
+    for (llvm::BasicBlock *pred : llvm::predecessors(phiBlock)) {
+      if (phi->getBasicBlockIndex(pred) >= 0) {
+        continue;
+      }
+      llvm::errs() << "Warning: PHI " << stmtId
+                   << " has no incoming value from predecessor "
+                   << pred->getName() << "; using undef\n";
+      phi->addIncoming(llvm::UndefValue::get(wordType), pred);
+    }
   }
   return llvm::Error::success();
 }
@@ -727,12 +773,15 @@ llvm::Error lowerFunction(llvm::Module &module, const TacProgram &program,
   }
 
   if (auto error = fillPhiIncoming(program, function, llvmBlocks, values,
-                                   phiNodes, context)) {
+                                   phiNodes, context, wordType)) {
     return error;
   }
-  if (auto error = fillSyntheticEntryPhiIncoming(program, function,
-                                                 syntheticEntryBlock, values,
-                                                 phiNodes, context)) {
+  if (auto error = fillSyntheticEntryPhiIncoming(
+          program, function, syntheticEntryBlock, values, phiNodes, context,
+          wordType)) {
+    return error;
+  }
+  if (auto error = completePhiIncoming(phiNodes, wordType)) {
     return error;
   }
   return llvm::Error::success();

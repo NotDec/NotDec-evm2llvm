@@ -147,8 +147,14 @@ llvm::Error validateSsaFacts(const TacProgram &program) {
     const auto &actualPreds = incomingPredsByPhi[stmtId];
     for (const auto &pred : expectedPreds) {
       if (actualPreds.count(pred) == 0) {
-        return makeError("PHIIncoming missing predecessor for PHI " + stmtId +
-                         " from " + pred);
+        // Gigahorse can leave a PHI variable undefined on some incoming edge
+        // (the value is only materialized on the paths its analysis followed).
+        // The LLVM PHI still needs one incoming per CFG predecessor, so the
+        // lowering synthesizes an undef for the missing edge and warns; this
+        // is not a fact inconsistency, only incomplete value coverage.
+        llvm::errs() << "Warning: PHIIncoming missing predecessor for PHI "
+                     << stmtId << " from " << pred
+                     << "; lowering inserts undef for that edge\n";
       }
     }
     for (const auto &pred : actualPreds) {
