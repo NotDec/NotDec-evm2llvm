@@ -42,3 +42,13 @@ TSan 报告里还有两组没处理的线索，优先级更高：
 
 - 崩溃仍在：solidity_patterns 每轮 1~2 个用例（24763 / 0032），只在 TBB 多线程路径触发。
 - oracle 对齐的 3 个 commit 与 PHI 修复不受影响；TSan 构建在 /tmp/build-evm-tsan。
+
+## 追加排查（同轮）：UType 池的无锁读者
+
+grep 了整个 binarysub：没有 for-each 式的无锁遍历 utype_pool()。唯一在锁外访问池内部状态的是 binarysub.cpp:6451 的 utype_pool().size()（在 processGroup 内、worker 线程执行），以及若干 SimplifyDiag 诊断里的 utype_pool().size()。
+
+utype_pool().size() 读 deque 的 _M_finish，与其它线程的 emplace_back（写 _M_finish/map）构成真实 data race，但只影响读到的计数，不足以解释 union term 向量里的野指针。因此 UType 池这条线索优先级下调。
+
+下一步应转向：
+1. TypeBuilder::convert:1085 的那条竞态（HType 侧共享状态）；
+2. 给 UType/CompactType/CompactVarSet 节点临时加 (creator_thread, seq) 标记，在崩溃点打印来源，确认是节点被复用改写还是指针被算错。
