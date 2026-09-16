@@ -83,7 +83,11 @@ ASan 构建下 solidity_patterns 63 / 40、type_recovery.evm 13 / 3；ASan 与�
 
 - `notdec.type_recovery.llvm_ir.tr_level_2`（8/14）和 `notdec.type_recovery.sysy.tr_level_2`（0/9）在修复前后都是 oracle 漂移：进程 exit=0，htypes 与期望不同（例如 `const(i32 1024)` 变成 `addr(0x400)`、多出 `struct_0` 字段）。这些 suite 的 oracle 也落后于当前源码，不属于本轮两个 bug 的回归——修复后没有任何一个 log 出现新增的 `cyclic UType` 警告。
 - `notdec.lifting.wasm` 通过（0.43s）。
-- 本次未跑 `notdec.type_recovery.realworld.tr_level_2`；如需要可单独补跑。
+- `notdec.type_recovery.realworld.tr_level_2` 的 `fortune.o3.wasm` 失败与本轮改动无关：日志里是
+  `Error: invalid MLsub extra constraints at ir_anchor.sha256: sha256 mismatch`
+  （fixture `test/type-recovery/realworld/support/fortune.o3.wasm.extra.json` 的
+  锚点哈希对不上当前输入），随后 `failExtraConstraints()` 主动 abort。
+  属于 fixture 过期问题，需要单独刷新锚点哈希。
 
 ## 提交
 
