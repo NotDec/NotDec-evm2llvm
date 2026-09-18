@@ -68,6 +68,17 @@ set_tests_properties(
   PROPERTIES DEPENDS evm2llvm.fixture.jumpi_condition.emit
 )
 
+# The ABI surface (selector entries and the 0x0 dispatcher) keeps external
+# linkage; outlined private helpers are internal from the start.
+add_test(
+  NAME evm2llvm.fixture.private_call.check-linkage
+  COMMAND /bin/sh -c "grep -Eq '^define internal .*@private_' '${CMAKE_CURRENT_BINARY_DIR}/private_call.ll' && grep -Eq '^define [a-z0-9_]* .*@public_' '${CMAKE_CURRENT_BINARY_DIR}/private_call.ll' && ! grep -Eq '^define internal .*@public_' '${CMAKE_CURRENT_BINARY_DIR}/private_call.ll'"
+)
+set_tests_properties(
+  evm2llvm.fixture.private_call.check-linkage
+  PROPERTIES DEPENDS evm2llvm.fixture.private_call.emit
+)
+
 if (NOTDEC_EVM2LLVM_ENABLE_GIGAHORSE_TESTS)
   function(add_evm2llvm_gigahorse_test name bytecode)
     set(output_ll "${CMAKE_CURRENT_BINARY_DIR}/gigahorse-${name}.ll")

@@ -8,7 +8,13 @@ The first implementation stage is intentionally small:
 1. read Gigahorse CSV facts;
 2. build a TAC/CFG/function model;
 3. emit verifier-clean LLVM IR with `i256` EVM words;
-4. keep EVM memory, calldata, returndata, env, and storage behind helper calls.
+4. keep EVM memory, calldata, returndata, env, and storage behind helper calls;
+5. classify linkage while emitting: only the contract ABI surface (selector
+   entries and the `0x0` dispatcher, `TacFunction::IsPublic`) keeps external
+   linkage, shared code outlined into `private_*` helpers is internal.  This is
+   the IR contract downstream passes rely on to tell "ABI surface" from
+   "internal helper" without parsing name prefixes, and it lets LLVM drop
+   helpers that nothing calls.
 
 The Solidity internals notes live under `docs/solidity_internals_zh/` so the
 project root stays focused on buildable source.

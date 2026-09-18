@@ -152,9 +152,17 @@ llvm::Function *createFunctionPrototype(llvm::Module &module,
   argTypes.insert(argTypes.end(), function.Formals.size(), wordType);
   auto *functionType =
       llvm::FunctionType::get(returnTypeFor(context, function), argTypes, false);
-  auto *llvmFunction =
-      llvm::Function::Create(functionType, llvm::GlobalValue::ExternalLinkage,
-                             functionName(function), module);
+  // Only the contract ABI surface keeps external linkage: selector entries and
+  // the 0x0 dispatcher take the runtime pointers and decode calldata in their
+  // own body.  Shared code outlined into private_* functions is not callable
+  // from outside the contract, so it is emitted as internal from the start.
+  // Consumers can then classify by linkage instead of the private__ name
+  // prefix, and LLVM may drop helpers that nothing calls.
+  const llvm::GlobalValue::LinkageTypes Linkage =
+      function.IsPublic ? llvm::GlobalValue::ExternalLinkage
+                        : llvm::GlobalValue::InternalLinkage;
+  auto *llvmFunction = llvm::Function::Create(functionType, Linkage,
+                                             functionName(function), module);
   llvmFunction->addFnAttr(llvm::Attribute::NullPointerIsValid);
   return llvmFunction;
 }
